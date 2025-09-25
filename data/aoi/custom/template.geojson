@@ -1,0 +1,27 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Custom AOI",
+        "description": "Custom Area of Interest for solar mapping",
+        "created_by": "user",
+        "date_created": "2024-01-01",
+        "notes": "Replace coordinates below with your custom area"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [77.0, 28.4],
+            [77.4, 28.4],
+            [77.4, 28.8],
+            [77.0, 28.8],
+            [77.0, 28.4]
+          ]
+        ]
+      }
+    }
+  ]
+}

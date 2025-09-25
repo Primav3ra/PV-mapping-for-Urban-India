@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bangalore",
+        "tier": "Tier 1",
+        "description": "Silicon Valley of India",
+        "population": 12000000,
+        "state": "Karnataka",
+        "area_km2": 741,
+        "city_key": "bangalore"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.4,
+              12.8
+            ],
+            [
+              77.8,
+              12.8
+            ],
+            [
+              77.8,
+              13.2
+            ],
+            [
+              77.4,
+              13.2
+            ],
+            [
+              77.4,
+              12.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

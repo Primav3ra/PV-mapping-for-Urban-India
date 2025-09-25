@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kolkata",
+        "tier": "Tier 1",
+        "description": "Cultural capital of India",
+        "population": 15000000,
+        "state": "West Bengal",
+        "area_km2": 205,
+        "region": "east"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              88.2,
+              22.4
+            ],
+            [
+              88.6,
+              22.4
+            ],
+            [
+              88.6,
+              22.8
+            ],
+            [
+              88.2,
+              22.8
+            ],
+            [
+              88.2,
+              22.4
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

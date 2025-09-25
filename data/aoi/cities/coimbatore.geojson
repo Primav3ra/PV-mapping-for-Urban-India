@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Coimbatore",
+        "tier": "Tier 3",
+        "description": "Manchester of South India",
+        "population": 2000000,
+        "state": "Tamil Nadu",
+        "area_km2": 246,
+        "city_key": "coimbatore"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.8,
+              10.8
+            ],
+            [
+              77.2,
+              10.8
+            ],
+            [
+              77.2,
+              11.2
+            ],
+            [
+              76.8,
+              11.2
+            ],
+            [
+              76.8,
+              10.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

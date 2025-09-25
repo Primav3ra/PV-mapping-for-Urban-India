@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kochi",
+        "tier": "Tier 2",
+        "description": "Queen of Arabian Sea",
+        "population": 2000000,
+        "state": "Kerala",
+        "area_km2": 95,
+        "city_key": "kochi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.0,
+              9.8
+            ],
+            [
+              76.4,
+              9.8
+            ],
+            [
+              76.4,
+              10.2
+            ],
+            [
+              76.0,
+              10.2
+            ],
+            [
+              76.0,
+              9.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

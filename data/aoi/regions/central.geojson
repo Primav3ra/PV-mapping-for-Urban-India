@@ -1,0 +1,122 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Hyderabad",
+        "tier": "Tier 1",
+        "description": "City of Pearls",
+        "population": 10000000,
+        "state": "Telangana",
+        "area_km2": 650,
+        "region": "central"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              78.2,
+              17.2
+            ],
+            [
+              78.6,
+              17.2
+            ],
+            [
+              78.6,
+              17.6
+            ],
+            [
+              78.2,
+              17.6
+            ],
+            [
+              78.2,
+              17.2
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Indore",
+        "tier": "Tier 3",
+        "description": "Commercial capital of Madhya Pradesh",
+        "population": 3000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 530,
+        "region": "central"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              22.6
+            ],
+            [
+              76.0,
+              22.6
+            ],
+            [
+              76.0,
+              23.0
+            ],
+            [
+              75.6,
+              23.0
+            ],
+            [
+              75.6,
+              22.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bhopal",
+        "tier": "Tier 3",
+        "description": "City of Lakes",
+        "population": 2000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 285,
+        "region": "central"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.2,
+              23.0
+            ],
+            [
+              77.6,
+              23.0
+            ],
+            [
+              77.6,
+              23.4
+            ],
+            [
+              77.2,
+              23.4
+            ],
+            [
+              77.2,
+              23.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

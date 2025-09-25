@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bhopal",
+        "tier": "Tier 3",
+        "description": "City of Lakes",
+        "population": 2000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 285,
+        "city_key": "bhopal"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.2,
+              23.0
+            ],
+            [
+              77.6,
+              23.0
+            ],
+            [
+              77.6,
+              23.4
+            ],
+            [
+              77.2,
+              23.4
+            ],
+            [
+              77.2,
+              23.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Delhi",
+        "tier": "Tier 1",
+        "description": "National Capital Region - Central Delhi",
+        "population": 32000000,
+        "state": "Delhi",
+        "area_km2": 1484,
+        "city_key": "delhi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.0,
+              28.4
+            ],
+            [
+              77.4,
+              28.4
+            ],
+            [
+              77.4,
+              28.8
+            ],
+            [
+              77.0,
+              28.8
+            ],
+            [
+              77.0,
+              28.4
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

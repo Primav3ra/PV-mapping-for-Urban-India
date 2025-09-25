@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chennai",
+        "tier": "Tier 1",
+        "description": "Gateway to South India",
+        "population": 11000000,
+        "state": "Tamil Nadu",
+        "area_km2": 426,
+        "city_key": "chennai"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              80.0,
+              12.8
+            ],
+            [
+              80.4,
+              12.8
+            ],
+            [
+              80.4,
+              13.2
+            ],
+            [
+              80.0,
+              13.2
+            ],
+            [
+              80.0,
+              12.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

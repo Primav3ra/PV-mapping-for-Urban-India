@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Vadodara",
+        "tier": "Tier 3",
+        "description": "Cultural capital of Gujarat",
+        "population": 2000000,
+        "state": "Gujarat",
+        "area_km2": 235,
+        "city_key": "vadodara"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.0,
+              22.2
+            ],
+            [
+              73.4,
+              22.2
+            ],
+            [
+              73.4,
+              22.6
+            ],
+            [
+              73.0,
+              22.6
+            ],
+            [
+              73.0,
+              22.2
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

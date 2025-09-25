@@ -1,0 +1,200 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Jaipur",
+        "tier": "Tier 2",
+        "description": "Pink City - Capital of Rajasthan",
+        "population": 4000000,
+        "state": "Rajasthan",
+        "area_km2": 467,
+        "region": "tier_tier_2"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              26.6
+            ],
+            [
+              76.0,
+              26.6
+            ],
+            [
+              76.0,
+              27.0
+            ],
+            [
+              75.6,
+              27.0
+            ],
+            [
+              75.6,
+              26.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Ahmedabad",
+        "tier": "Tier 2",
+        "description": "Manchester of India",
+        "population": 8000000,
+        "state": "Gujarat",
+        "area_km2": 464,
+        "region": "tier_tier_2"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              72.4,
+              23.0
+            ],
+            [
+              72.8,
+              23.0
+            ],
+            [
+              72.8,
+              23.4
+            ],
+            [
+              72.4,
+              23.4
+            ],
+            [
+              72.4,
+              23.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Pune",
+        "tier": "Tier 2",
+        "description": "Oxford of the East",
+        "population": 7000000,
+        "state": "Maharashtra",
+        "area_km2": 331,
+        "region": "tier_tier_2"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.6,
+              18.4
+            ],
+            [
+              74.0,
+              18.4
+            ],
+            [
+              74.0,
+              18.8
+            ],
+            [
+              73.6,
+              18.8
+            ],
+            [
+              73.6,
+              18.4
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kochi",
+        "tier": "Tier 2",
+        "description": "Queen of Arabian Sea",
+        "population": 2000000,
+        "state": "Kerala",
+        "area_km2": 95,
+        "region": "tier_tier_2"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.0,
+              9.8
+            ],
+            [
+              76.4,
+              9.8
+            ],
+            [
+              76.4,
+              10.2
+            ],
+            [
+              76.0,
+              10.2
+            ],
+            [
+              76.0,
+              9.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chandigarh",
+        "tier": "Tier 2",
+        "description": "City Beautiful - Planned city",
+        "population": 1200000,
+        "state": "Chandigarh",
+        "area_km2": 114,
+        "region": "tier_tier_2"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.6,
+              30.6
+            ],
+            [
+              77.0,
+              30.6
+            ],
+            [
+              77.0,
+              31.0
+            ],
+            [
+              76.6,
+              31.0
+            ],
+            [
+              76.6,
+              30.6
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

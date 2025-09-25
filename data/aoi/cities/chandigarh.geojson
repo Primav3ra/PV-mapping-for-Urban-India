@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chandigarh",
+        "tier": "Tier 2",
+        "description": "City Beautiful - Planned city",
+        "population": 1200000,
+        "state": "Chandigarh",
+        "area_km2": 114,
+        "city_key": "chandigarh"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.6,
+              30.6
+            ],
+            [
+              77.0,
+              30.6
+            ],
+            [
+              77.0,
+              31.0
+            ],
+            [
+              76.6,
+              31.0
+            ],
+            [
+              76.6,
+              30.6
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

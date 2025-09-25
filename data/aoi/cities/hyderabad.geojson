@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Hyderabad",
+        "tier": "Tier 1",
+        "description": "City of Pearls",
+        "population": 10000000,
+        "state": "Telangana",
+        "area_km2": 650,
+        "city_key": "hyderabad"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              78.2,
+              17.2
+            ],
+            [
+              78.6,
+              17.2
+            ],
+            [
+              78.6,
+              17.6
+            ],
+            [
+              78.2,
+              17.6
+            ],
+            [
+              78.2,
+              17.2
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

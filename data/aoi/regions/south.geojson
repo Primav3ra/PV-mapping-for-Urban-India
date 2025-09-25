@@ -1,0 +1,161 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bangalore",
+        "tier": "Tier 1",
+        "description": "Silicon Valley of India",
+        "population": 12000000,
+        "state": "Karnataka",
+        "area_km2": 741,
+        "region": "south"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.4,
+              12.8
+            ],
+            [
+              77.8,
+              12.8
+            ],
+            [
+              77.8,
+              13.2
+            ],
+            [
+              77.4,
+              13.2
+            ],
+            [
+              77.4,
+              12.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chennai",
+        "tier": "Tier 1",
+        "description": "Gateway to South India",
+        "population": 11000000,
+        "state": "Tamil Nadu",
+        "area_km2": 426,
+        "region": "south"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              80.0,
+              12.8
+            ],
+            [
+              80.4,
+              12.8
+            ],
+            [
+              80.4,
+              13.2
+            ],
+            [
+              80.0,
+              13.2
+            ],
+            [
+              80.0,
+              12.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kochi",
+        "tier": "Tier 2",
+        "description": "Queen of Arabian Sea",
+        "population": 2000000,
+        "state": "Kerala",
+        "area_km2": 95,
+        "region": "south"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.0,
+              9.8
+            ],
+            [
+              76.4,
+              9.8
+            ],
+            [
+              76.4,
+              10.2
+            ],
+            [
+              76.0,
+              10.2
+            ],
+            [
+              76.0,
+              9.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Coimbatore",
+        "tier": "Tier 3",
+        "description": "Manchester of South India",
+        "population": 2000000,
+        "state": "Tamil Nadu",
+        "area_km2": 246,
+        "region": "south"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.8,
+              10.8
+            ],
+            [
+              77.2,
+              10.8
+            ],
+            [
+              77.2,
+              11.2
+            ],
+            [
+              76.8,
+              11.2
+            ],
+            [
+              76.8,
+              10.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

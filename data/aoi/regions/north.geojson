@@ -1,0 +1,122 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Delhi",
+        "tier": "Tier 1",
+        "description": "National Capital Region - Central Delhi",
+        "population": 32000000,
+        "state": "Delhi",
+        "area_km2": 1484,
+        "region": "north"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.0,
+              28.4
+            ],
+            [
+              77.4,
+              28.4
+            ],
+            [
+              77.4,
+              28.8
+            ],
+            [
+              77.0,
+              28.8
+            ],
+            [
+              77.0,
+              28.4
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chandigarh",
+        "tier": "Tier 2",
+        "description": "City Beautiful - Planned city",
+        "population": 1200000,
+        "state": "Chandigarh",
+        "area_km2": 114,
+        "region": "north"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.6,
+              30.6
+            ],
+            [
+              77.0,
+              30.6
+            ],
+            [
+              77.0,
+              31.0
+            ],
+            [
+              76.6,
+              31.0
+            ],
+            [
+              76.6,
+              30.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Jaipur",
+        "tier": "Tier 2",
+        "description": "Pink City - Capital of Rajasthan",
+        "population": 4000000,
+        "state": "Rajasthan",
+        "area_km2": 467,
+        "region": "north"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              26.6
+            ],
+            [
+              76.0,
+              26.6
+            ],
+            [
+              76.0,
+              27.0
+            ],
+            [
+              75.6,
+              27.0
+            ],
+            [
+              75.6,
+              26.6
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

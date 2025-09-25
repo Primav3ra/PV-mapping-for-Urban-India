@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Pune",
+        "tier": "Tier 2",
+        "description": "Oxford of the East",
+        "population": 7000000,
+        "state": "Maharashtra",
+        "area_km2": 331,
+        "city_key": "pune"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.6,
+              18.4
+            ],
+            [
+              74.0,
+              18.4
+            ],
+            [
+              74.0,
+              18.8
+            ],
+            [
+              73.6,
+              18.8
+            ],
+            [
+              73.6,
+              18.4
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,590 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Delhi",
+        "tier": "Tier 1",
+        "description": "National Capital Region - Central Delhi",
+        "population": 32000000,
+        "state": "Delhi",
+        "area_km2": 1484,
+        "city_key": "delhi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.0,
+              28.4
+            ],
+            [
+              77.4,
+              28.4
+            ],
+            [
+              77.4,
+              28.8
+            ],
+            [
+              77.0,
+              28.8
+            ],
+            [
+              77.0,
+              28.4
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mumbai",
+        "tier": "Tier 1",
+        "description": "Financial capital of India",
+        "population": 20000000,
+        "state": "Maharashtra",
+        "area_km2": 603,
+        "city_key": "mumbai"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              72.7,
+              18.8
+            ],
+            [
+              73.0,
+              18.8
+            ],
+            [
+              73.0,
+              19.3
+            ],
+            [
+              72.7,
+              19.3
+            ],
+            [
+              72.7,
+              18.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bangalore",
+        "tier": "Tier 1",
+        "description": "Silicon Valley of India",
+        "population": 12000000,
+        "state": "Karnataka",
+        "area_km2": 741,
+        "city_key": "bangalore"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.4,
+              12.8
+            ],
+            [
+              77.8,
+              12.8
+            ],
+            [
+              77.8,
+              13.2
+            ],
+            [
+              77.4,
+              13.2
+            ],
+            [
+              77.4,
+              12.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chennai",
+        "tier": "Tier 1",
+        "description": "Gateway to South India",
+        "population": 11000000,
+        "state": "Tamil Nadu",
+        "area_km2": 426,
+        "city_key": "chennai"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              80.0,
+              12.8
+            ],
+            [
+              80.4,
+              12.8
+            ],
+            [
+              80.4,
+              13.2
+            ],
+            [
+              80.0,
+              13.2
+            ],
+            [
+              80.0,
+              12.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kolkata",
+        "tier": "Tier 1",
+        "description": "Cultural capital of India",
+        "population": 15000000,
+        "state": "West Bengal",
+        "area_km2": 205,
+        "city_key": "kolkata"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              88.2,
+              22.4
+            ],
+            [
+              88.6,
+              22.4
+            ],
+            [
+              88.6,
+              22.8
+            ],
+            [
+              88.2,
+              22.8
+            ],
+            [
+              88.2,
+              22.4
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Hyderabad",
+        "tier": "Tier 1",
+        "description": "City of Pearls",
+        "population": 10000000,
+        "state": "Telangana",
+        "area_km2": 650,
+        "city_key": "hyderabad"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              78.2,
+              17.2
+            ],
+            [
+              78.6,
+              17.2
+            ],
+            [
+              78.6,
+              17.6
+            ],
+            [
+              78.2,
+              17.6
+            ],
+            [
+              78.2,
+              17.2
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Jaipur",
+        "tier": "Tier 2",
+        "description": "Pink City - Capital of Rajasthan",
+        "population": 4000000,
+        "state": "Rajasthan",
+        "area_km2": 467,
+        "city_key": "jaipur"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              26.6
+            ],
+            [
+              76.0,
+              26.6
+            ],
+            [
+              76.0,
+              27.0
+            ],
+            [
+              75.6,
+              27.0
+            ],
+            [
+              75.6,
+              26.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Ahmedabad",
+        "tier": "Tier 2",
+        "description": "Manchester of India",
+        "population": 8000000,
+        "state": "Gujarat",
+        "area_km2": 464,
+        "city_key": "ahmedabad"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              72.4,
+              23.0
+            ],
+            [
+              72.8,
+              23.0
+            ],
+            [
+              72.8,
+              23.4
+            ],
+            [
+              72.4,
+              23.4
+            ],
+            [
+              72.4,
+              23.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Pune",
+        "tier": "Tier 2",
+        "description": "Oxford of the East",
+        "population": 7000000,
+        "state": "Maharashtra",
+        "area_km2": 331,
+        "city_key": "pune"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.6,
+              18.4
+            ],
+            [
+              74.0,
+              18.4
+            ],
+            [
+              74.0,
+              18.8
+            ],
+            [
+              73.6,
+              18.8
+            ],
+            [
+              73.6,
+              18.4
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kochi",
+        "tier": "Tier 2",
+        "description": "Queen of Arabian Sea",
+        "population": 2000000,
+        "state": "Kerala",
+        "area_km2": 95,
+        "city_key": "kochi"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.0,
+              9.8
+            ],
+            [
+              76.4,
+              9.8
+            ],
+            [
+              76.4,
+              10.2
+            ],
+            [
+              76.0,
+              10.2
+            ],
+            [
+              76.0,
+              9.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chandigarh",
+        "tier": "Tier 2",
+        "description": "City Beautiful - Planned city",
+        "population": 1200000,
+        "state": "Chandigarh",
+        "area_km2": 114,
+        "city_key": "chandigarh"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.6,
+              30.6
+            ],
+            [
+              77.0,
+              30.6
+            ],
+            [
+              77.0,
+              31.0
+            ],
+            [
+              76.6,
+              31.0
+            ],
+            [
+              76.6,
+              30.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Indore",
+        "tier": "Tier 3",
+        "description": "Commercial capital of Madhya Pradesh",
+        "population": 3000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 530,
+        "city_key": "indore"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              22.6
+            ],
+            [
+              76.0,
+              22.6
+            ],
+            [
+              76.0,
+              23.0
+            ],
+            [
+              75.6,
+              23.0
+            ],
+            [
+              75.6,
+              22.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bhopal",
+        "tier": "Tier 3",
+        "description": "City of Lakes",
+        "population": 2000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 285,
+        "city_key": "bhopal"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.2,
+              23.0
+            ],
+            [
+              77.6,
+              23.0
+            ],
+            [
+              77.6,
+              23.4
+            ],
+            [
+              77.2,
+              23.4
+            ],
+            [
+              77.2,
+              23.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Coimbatore",
+        "tier": "Tier 3",
+        "description": "Manchester of South India",
+        "population": 2000000,
+        "state": "Tamil Nadu",
+        "area_km2": 246,
+        "city_key": "coimbatore"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.8,
+              10.8
+            ],
+            [
+              77.2,
+              10.8
+            ],
+            [
+              77.2,
+              11.2
+            ],
+            [
+              76.8,
+              11.2
+            ],
+            [
+              76.8,
+              10.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Vadodara",
+        "tier": "Tier 3",
+        "description": "Cultural capital of Gujarat",
+        "population": 2000000,
+        "state": "Gujarat",
+        "area_km2": 235,
+        "city_key": "vadodara"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.0,
+              22.2
+            ],
+            [
+              73.4,
+              22.2
+            ],
+            [
+              73.4,
+              22.6
+            ],
+            [
+              73.0,
+              22.6
+            ],
+            [
+              73.0,
+              22.2
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

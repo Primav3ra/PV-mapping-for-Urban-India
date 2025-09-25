@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Jaipur",
+        "tier": "Tier 2",
+        "description": "Pink City - Capital of Rajasthan",
+        "population": 4000000,
+        "state": "Rajasthan",
+        "area_km2": 467,
+        "city_key": "jaipur"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              26.6
+            ],
+            [
+              76.0,
+              26.6
+            ],
+            [
+              76.0,
+              27.0
+            ],
+            [
+              75.6,
+              27.0
+            ],
+            [
+              75.6,
+              26.6
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

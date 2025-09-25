@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mumbai",
+        "tier": "Tier 1",
+        "description": "Financial capital of India",
+        "population": 20000000,
+        "state": "Maharashtra",
+        "area_km2": 603,
+        "city_key": "mumbai"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              72.7,
+              18.8
+            ],
+            [
+              73.0,
+              18.8
+            ],
+            [
+              73.0,
+              19.3
+            ],
+            [
+              72.7,
+              19.3
+            ],
+            [
+              72.7,
+              18.8
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

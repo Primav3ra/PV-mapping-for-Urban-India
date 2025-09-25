@@ -1,0 +1,161 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Indore",
+        "tier": "Tier 3",
+        "description": "Commercial capital of Madhya Pradesh",
+        "population": 3000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 530,
+        "region": "tier_tier_3"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              75.6,
+              22.6
+            ],
+            [
+              76.0,
+              22.6
+            ],
+            [
+              76.0,
+              23.0
+            ],
+            [
+              75.6,
+              23.0
+            ],
+            [
+              75.6,
+              22.6
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bhopal",
+        "tier": "Tier 3",
+        "description": "City of Lakes",
+        "population": 2000000,
+        "state": "Madhya Pradesh",
+        "area_km2": 285,
+        "region": "tier_tier_3"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              77.2,
+              23.0
+            ],
+            [
+              77.6,
+              23.0
+            ],
+            [
+              77.6,
+              23.4
+            ],
+            [
+              77.2,
+              23.4
+            ],
+            [
+              77.2,
+              23.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Coimbatore",
+        "tier": "Tier 3",
+        "description": "Manchester of South India",
+        "population": 2000000,
+        "state": "Tamil Nadu",
+        "area_km2": 246,
+        "region": "tier_tier_3"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              76.8,
+              10.8
+            ],
+            [
+              77.2,
+              10.8
+            ],
+            [
+              77.2,
+              11.2
+            ],
+            [
+              76.8,
+              11.2
+            ],
+            [
+              76.8,
+              10.8
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Vadodara",
+        "tier": "Tier 3",
+        "description": "Cultural capital of Gujarat",
+        "population": 2000000,
+        "state": "Gujarat",
+        "area_km2": 235,
+        "region": "tier_tier_3"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              73.0,
+              22.2
+            ],
+            [
+              73.4,
+              22.2
+            ],
+            [
+              73.4,
+              22.6
+            ],
+            [
+              73.0,
+              22.6
+            ],
+            [
+              73.0,
+              22.2
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
