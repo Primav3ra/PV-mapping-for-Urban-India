@@ -17,6 +17,27 @@ except ImportError:
     except ImportError:
         pass
 
+try:
+    from rooftops import get_rooftop_area_m2_info as _get_rooftop_area_m2_info
+    _HAS_ROOFTOPS = True
+except ImportError:
+    try:
+        from scripts.rooftops import get_rooftop_area_m2_info as _get_rooftop_area_m2_info
+        _HAS_ROOFTOPS = True
+    except ImportError:
+        _HAS_ROOFTOPS = False
+
+try:
+    from irradiance_baseline import get_merra_baseline_info as _get_merra_baseline_info
+    _HAS_IRRADIANCE = True
+except ImportError:
+    try:
+        from scripts.irradiance_baseline import get_merra_baseline_info as _get_merra_baseline_info
+        _HAS_IRRADIANCE = True
+    except ImportError:
+        _HAS_IRRADIANCE = False
+
+
 class SolarMappingUtils:
     def __init__(self, project_id: str):
         self.project_id = project_id
@@ -126,7 +147,51 @@ class SolarMappingUtils:
         exclusion_mask = steep_slopes.Not()
         
         return exclusion_mask
-    
+
+    def get_rooftop_candidate_stats(
+        self,
+        aoi: ee.Geometry,
+        exclusion_mask: Optional[ee.Image] = None,
+        year: Optional[int] = 2022,
+        presence_threshold: float = 0.5,
+        min_height_m: float = 0.0,
+        reduce_scale_m: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Rooftop candidate area (m^2) from Open Buildings 2.5D + optional terrain exclusion.
+
+        Requires scripts/rooftops.py and datasets.py. See rooftops.choose_reduce_scale_m for
+        default scaling on large AOIs.
+        """
+        if not _HAS_ROOFTOPS:
+            raise RuntimeError("rooftops module not found; ensure scripts/rooftops.py is on PYTHONPATH")
+        return _get_rooftop_area_m2_info(
+            aoi,
+            year=year,
+            presence_threshold=presence_threshold,
+            min_height_m=min_height_m,
+            exclusion_mask=exclusion_mask,
+            scale_m=reduce_scale_m,
+        )
+
+    def get_merra_baseline_stats(
+        self,
+        aoi: ee.Geometry,
+        start_year: int = 2015,
+        end_year: int = 2019,
+        scale_m: float = 50_000.0,
+    ) -> Dict[str, Any]:
+        """
+        Mean annual surface incoming shortwave (all-sky) from MERRA-2 SWGDN, kWh/m^2/year.
+
+        Coarse grid (~50-70 km); use as regional climatology before rooftop penalties.
+        """
+        if not _HAS_IRRADIANCE:
+            raise RuntimeError("irradiance_baseline module not found")
+        return _get_merra_baseline_info(
+            aoi, start_year=start_year, end_year=end_year, scale_m=scale_m
+        )
+
     def get_solar_irradiance_data(self, aoi: ee.Geometry) -> ee.Image:
         """Get solar irradiance data for the AOI"""
         # Using NASA POWER data as a proxy for solar irradiance

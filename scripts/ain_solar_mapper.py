@@ -210,16 +210,16 @@ class SolarPotentialMapper:
         
         self.current_city = self.cities[city_name.lower()]
         self.aoi = ee.Geometry.Polygon(self.current_city.coordinates)
-        print(f"✅ AOI set to: {self.current_city.name} ({self.current_city.tier.value})")
-        print(f"   State: {self.current_city.state}")
-        print(f"   Population: {self.current_city.population:,}")
-        print(f"   Area: {self.current_city.area_km2} km²")
+        print(f"[OK] AOI set to: {self.current_city.name} ({self.current_city.tier.value})")
+        print(f"     State: {self.current_city.state}")
+        print(f"     Population: {self.current_city.population:,}")
+        print(f"     Area: {self.current_city.area_km2} km^2")
     
     def set_aoi_by_coordinates(self, coordinates: List[List[float]]):
         """Set AOI by custom coordinates"""
         self.aoi = ee.Geometry.Polygon(coordinates)
         self.current_city = None
-        print("✅ AOI set to custom coordinates")
+        print("[OK] AOI set to custom coordinates")
     
     def set_aoi_from_geojson(self, city_name: str, geojson_path: str = 'data/aoi.geojson'):
         """Set AOI from GeoJSON file"""
@@ -227,32 +227,32 @@ class SolarPotentialMapper:
         # Try to get city info from AOI manager
         try:
             self.current_city = self.aoi_manager.get_city(city_name)
-            print(f"✅ AOI loaded from GeoJSON: {self.current_city.name}")
-        except:
+            print(f"[OK] AOI loaded from GeoJSON: {self.current_city.name}")
+        except Exception:
             self.current_city = None
-            print(f"✅ AOI loaded from GeoJSON: {city_name}")
+            print(f"[OK] AOI loaded from GeoJSON: {city_name}")
     
     def set_aoi_from_city_file(self, city_name: str):
         """Set AOI from individual city file in organized structure"""
         self.aoi = self.utils.load_aoi_from_city_file(city_name)
         try:
             self.current_city = self.aoi_manager.get_city(city_name)
-            print(f"✅ AOI loaded from city file: {self.current_city.name}")
-        except:
+            print(f"[OK] AOI loaded from city file: {self.current_city.name}")
+        except Exception:
             self.current_city = None
-            print(f"✅ AOI loaded from city file: {city_name}")
+            print(f"[OK] AOI loaded from city file: {city_name}")
     
     def set_aoi_from_tier_file(self, tier: str):
         """Set AOI from tier file in organized structure"""
         self.aoi = self.utils.load_aoi_from_tier_file(tier)
         self.current_city = None
-        print(f"✅ AOI loaded from tier file: {tier}")
+        print(f"[OK] AOI loaded from tier file: {tier}")
     
     def set_aoi_from_region_file(self, region: str):
         """Set AOI from region file in organized structure"""
         self.aoi = self.utils.load_aoi_from_region_file(region)
         self.current_city = None
-        print(f"✅ AOI loaded from region file: {region}")
+        print(f"[OK] AOI loaded from region file: {region}")
     
     def get_elevation_data(self) -> ee.Image:
         """Get Digital Elevation Model for current AOI"""
@@ -284,26 +284,42 @@ class SolarPotentialMapper:
         if self.aoi is None:
             raise ValueError("AOI not set. Use set_aoi_by_city() or set_aoi_by_coordinates()")
         
-        print("🔍 Running solar potential analysis...")
+        print("[INFO] Running solar potential analysis...")
         
         # Get elevation data
         dem = self.get_elevation_data()
-        print("✅ Elevation data loaded")
+        print("[OK] Elevation data loaded")
         
         # Calculate terrain
         terrain = self.calculate_slope_aspect(dem)
-        print("✅ Slope and aspect calculated")
+        print("[OK] Slope and aspect calculated")
         
         # Create exclusion mask
         exclusion = self.create_exclusion_mask()
-        print("✅ Exclusion mask created")
+        print("[OK] Exclusion mask created")
+
+        # Rooftop candidate mask area (Open Buildings 2.5D + terrain exclusion)
+        rooftop_stats = self.utils.get_rooftop_candidate_stats(
+            self.aoi,
+            exclusion_mask=exclusion,
+            year=2022,
+            presence_threshold=0.5,
+            min_height_m=0.0,
+        )
+        print("[OK] Rooftop candidate area computed")
+
+        # MERRA-2 mean annual surface incoming shortwave (baseline resource, coarse grid)
+        irradiance_stats = self.utils.get_merra_baseline_stats(
+            self.aoi, start_year=2015, end_year=2019
+        )
+        print("[OK] MERRA-2 baseline irradiance (mean annual SW) computed")
         
         # Calculate solar potential
         solar_data = self.calculate_solar_potential()
-        print("✅ Solar potential calculated")
+        print("[OK] Solar potential calculated")
         
         # Get basic statistics
-        aoi_area = self.aoi.area().divide(1e6).getInfo()  # Convert to km²
+        aoi_area = self.aoi.area().divide(1e6).getInfo()  # km^2
         
         return {
             "city": self.current_city.name if self.current_city else "Custom AOI",
@@ -313,7 +329,9 @@ class SolarPotentialMapper:
             "elevation_range": {
                 "min": dem.reduceRegion(ee.Reducer.min(), self.aoi, 1000).getInfo(),
                 "max": dem.reduceRegion(ee.Reducer.max(), self.aoi, 1000).getInfo()
-            }
+            },
+            "rooftop": rooftop_stats,
+            "irradiance_baseline": irradiance_stats,
         }
     
     def analyze_multiple_cities(self, city_names: List[str]) -> Dict[str, Any]:
@@ -321,12 +339,12 @@ class SolarPotentialMapper:
         results = {}
         
         for city_name in city_names:
-            print(f"\n🔍 Analyzing {city_name}...")
+            print(f"\n[INFO] Analyzing {city_name}...")
             try:
                 self.set_aoi_by_city(city_name)
                 results[city_name] = self.run_analysis()
             except Exception as e:
-                print(f"❌ Error analyzing {city_name}: {str(e)}")
+                print(f"[FAIL] Error analyzing {city_name}: {str(e)}")
                 results[city_name] = {"error": str(e)}
         
         return results
@@ -336,7 +354,7 @@ class SolarPotentialMapper:
         cities_in_tier = [city for city in self.cities.values() if city.tier == tier]
         city_names = [city.name.lower() for city in cities_in_tier]
         
-        print(f"🚀 Analyzing all {tier.value} cities: {len(cities_in_tier)} cities")
+        print(f"[INFO] Analyzing all {tier.value} cities: {len(cities_in_tier)} cities")
         return self.analyze_multiple_cities(city_names)
     
     def analyze_by_region(self, region: str) -> Dict[str, Any]:
@@ -356,7 +374,7 @@ class SolarPotentialMapper:
         city_names = regions[region.lower()]
         cities_in_region = [self.cities[name] for name in city_names if name in self.cities]
         
-        print(f"🌍 Analyzing {region} region: {len(cities_in_region)} cities")
+        print(f"[INFO] Analyzing {region} region: {len(cities_in_region)} cities")
         return self.analyze_multiple_cities(city_names)
     
     def export_results(self, results: Dict[str, Any], output_path: str):
@@ -364,7 +382,7 @@ class SolarPotentialMapper:
         import json
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"✅ Results exported to {output_path}")
+        print(f"[OK] Results exported to {output_path}")
     
     def get_city_info(self, city_name: str) -> Dict[str, Any]:
         """Get detailed information about a city"""
@@ -385,16 +403,16 @@ class SolarPotentialMapper:
     
     def list_available_cities(self):
         """List all available cities"""
-        print("🏙️  AVAILABLE CITIES FOR SOLAR MAPPING")
+        print("AVAILABLE CITIES FOR SOLAR MAPPING")
         print("=" * 50)
         
         for tier in CityTier:
             cities_in_tier = [city for city in self.cities.values() if city.tier == tier]
             print(f"\n{tier.value} CITIES:")
             for city in cities_in_tier:
-                print(f"  • {city.name} ({city.state}) - Pop: {city.population:,}")
+                print(f"  - {city.name} ({city.state}) - Pop: {city.population:,}")
         
-        print(f"\n📊 TOTAL: {len(self.cities)} cities available")
+        print(f"\n[INFO] Total: {len(self.cities)} cities available")
     
     def export_aoi_to_geojson(self, city_name: str, output_path: str):
         """Export city AOI to GeoJSON file"""
@@ -429,4 +447,4 @@ class SolarPotentialMapper:
         with open(output_path, 'w') as f:
             json.dump(geojson, f, indent=2)
         
-        print(f"✅ AOI exported to {output_path}")
+        print(f"[OK] AOI exported to {output_path}")

@@ -24,6 +24,8 @@ CATALOG = {
     "sentinel2_sr_legacy": "COPERNICUS/S2_SR",
     # Land surface temperature: for UHI
     "modis_lst": "MODIS/061/MOD11A2",
+    # MERRA-2 hourly radiation (surface incoming shortwave SWGDN)
+    "merra_rad": "NASA/GSFC/MERRA/rad/2",
 }
 
 
@@ -62,14 +64,14 @@ def get_open_buildings_temporal(
 ) -> ee.Image:
     """
     Load Open Buildings 2.5D Temporal: building presence, height, fractional count.
-    Effective resolution ~4 m; annual composites 2016–2023.
+    Effective resolution ~4 m; annual composites 2016-2023.
 
     Parameters
     ----------
     aoi : ee.Geometry
         Area of interest.
     year : int, optional
-        Year to use (2016–2023). If None, uses latest available (2023).
+        Year to use (2016-2023). If None, uses latest available (2023).
 
     Returns
     -------
@@ -171,8 +173,12 @@ def get_available_datasets() -> dict:
         "fabdem": {"id": CATALOG["fabdem"], "purpose": "30m bare-earth DEM, buildings/forest removed"},
         "open_buildings_temporal": {
             "id": CATALOG["open_buildings_temporal"],
-            "purpose": "Building presence, height, fractional count; ~4m; 2016–2023",
+            "purpose": "Building presence, height, fractional count; ~4m; 2016-2023",
         },
         "sentinel2_sr": {"id": CATALOG["sentinel2_sr"], "purpose": "Surface reflectance for DBSI, NDVI"},
         "modis_lst": {"id": CATALOG["modis_lst"], "purpose": "8-day LST for UHI (day/night)"},
+        "merra_rad": {
+            "id": CATALOG["merra_rad"],
+            "purpose": "MERRA-2 hourly radiation; SWGDN baseline (kWh/m2/yr climatology)",
+        },
     }
