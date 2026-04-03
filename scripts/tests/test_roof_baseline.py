@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Validate roof-masked MERRA-2 baseline computation (Options A and B consistency).
+Validate roof-masked ERA5 baseline computation.
+
+Checks:
+  - roof_area_m2 > 0
+  - regional_irradiance_kwh_m2_year in plausible range for Delhi (1700-2200)
+  - pre_penalty_total_kwh_year > 0
+
 Run from project root:
   python scripts/tests/test_roof_baseline.py
 """
@@ -37,44 +43,54 @@ def main() -> int:
     try:
         from scripts.datasets import get_open_buildings_temporal
         from scripts.rooftops import build_rooftop_candidate_mask
-        from scripts.irradiance_baseline import get_roof_masked_merra_baseline_info
+        from scripts.irradiance_baseline import get_roof_masked_era5_baseline_info
     except ImportError:
         from datasets import get_open_buildings_temporal
         from rooftops import build_rooftop_candidate_mask
-        from irradiance_baseline import get_roof_masked_merra_baseline_info
+        from irradiance_baseline import get_roof_masked_era5_baseline_info
 
     buildings = get_open_buildings_temporal(aoi, year=2022)
     roof_mask = build_rooftop_candidate_mask(buildings, presence_threshold=0.5, min_height_m=0.0)
 
-    info = get_roof_masked_merra_baseline_info(
+    info = get_roof_masked_era5_baseline_info(
         aoi=aoi,
         roof_mask=roof_mask,
         start_year=2020,
         end_year=2024,
-        scale_m=50_000.0,
     )
 
-    diff = float(info.get("consistency_abs_diff_kwh_m2_year", 0.0))
-    diff_independent_mean = float(info.get("independent_mean_abs_diff_kwh_m2_year", 0.0))
-    diff_independent_total = float(info.get("independent_total_abs_diff_kwh_year", 0.0))
-    mean_opt_a = info.get("roof_baseline_mean_kwh_m2_year")
-    total_opt_b = info.get("roof_baseline_total_kwh_year")
-    roof_area_m2 = info.get("roof_area_m2")
+    roof_area = info["roof_area_m2"]
+    irr = info["regional_irradiance_kwh_m2_year"]
+    total = info["pre_penalty_total_kwh_year"]
+    src = info["irradiance_source"]
 
-    print(f"[PASS] roof_area_m2={roof_area_m2:.2f} m^2 (coarse MERRA-scale estimate)")
-    print(f"[PASS] Option A mean baseline={mean_opt_a:.3f} kWh/m^2/year")
-    print(f"[PASS] Option B total baseline={total_opt_b:.2f} kWh/year")
-    print(f"[PASS] consistency_abs_diff_kwh_m2_year={diff:.6f}")
-    print(f"[PASS] independent_mean_abs_diff_kwh_m2_year={diff_independent_mean:.6f}")
-    print(f"[PASS] independent_total_abs_diff_kwh_year={diff_independent_total:.2f}")
+    print(f"roof_area_m2                  = {roof_area:.1f} m^2")
+    print(f"regional_irradiance_kwh_m2_yr = {irr:.1f} kWh/m^2/year  [source: {src}]")
+    print(f"pre_penalty_total_kwh_year    = {total:.0f} kWh/year")
+    print(f"collection                    = {info['collection']}")
+    print(f"Global Solar Atlas reference  = ~1930 kWh/m^2/year (Delhi)")
 
-    if diff < 1e-3 and diff_independent_mean < 5.0:
-        return 0
+    ok = True
+    if roof_area <= 0:
+        print("[FAIL] roof_area_m2 is zero or negative")
+        ok = False
     else:
-        print("[WARN] Consistency check is higher than expected; check scale alignment.")
-        return 0
+        print(f"[PASS] roof_area_m2 > 0")
+
+    if 1700 <= irr <= 2200:
+        print(f"[PASS] regional_irradiance in expected range [1700, 2200]")
+    else:
+        print(f"[WARN] regional_irradiance {irr:.1f} outside expected range -- check units/collection")
+        ok = False
+
+    if total > 0:
+        print(f"[PASS] pre_penalty_total_kwh_year > 0")
+    else:
+        print(f"[FAIL] pre_penalty_total_kwh_year is zero")
+        ok = False
+
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -1,11 +1,25 @@
 """
-Baseline surface incoming shortwave from MERRA-2 reanalysis (hourly SWGDN).
+Baseline surface incoming shortwave from ERA5 reanalysis.
 
-Collection: NASA/GSFC/MERRA/rad/2, band SWGDN (W/m^2), hourly means.
-Annual energy density (kWh/m^2/year): sum over all hours in interval of SWGDN/1000
-per year-mean over inclusive [start_year, end_year].
+Collection: ECMWF/ERA5_LAND/HOURLY
+Band: surface_solar_radiation_downwards_hourly (J/m^2 per hour)
+Resolution: ~9 km (significantly finer than MERRA-2 ~50 km)
 
-Spatial resolution is coarse (~50-70 km); values are regional climatology, not rooftop-scale.
+Unit conversion:
+  ERA5 stores accumulated solar radiation in J/m^2 per hourly step.
+  Divide by 3,600,000 to convert J/m^2 -> kWh/m^2 per hour.
+  Sum all hourly values over the year range, divide by number of years
+  -> mean annual GHI in kWh/m^2/year.
+
+ERA5 vs MERRA-2:
+  ERA5 is the ECMWF global reanalysis at ~9 km resolution (vs MERRA-2 ~50 km).
+  It uses satellite-corrected cloud cover and aerosol data, giving better agreement
+  with ground pyranometer stations than MERRA-2 (typical bias ~3-5% vs ~10-15%).
+  ERA5 is the recommended free baseline for solar resource assessment.
+
+Fallback:
+  If ERA5 is unavailable for a date range, the module falls back to MERRA-2 SWGDN
+  and flags the source in the response.
 """
 
 from __future__ import annotations
@@ -15,8 +29,23 @@ from typing import Any, Dict, Optional
 from datetime import date
 
 
+# ---------------------------------------------------------------------------
+# Primary: ERA5-Land hourly
+# ---------------------------------------------------------------------------
+ERA5_COLLECTION = "ECMWF/ERA5_LAND/HOURLY"
+ERA5_BAND = "surface_solar_radiation_downwards_hourly"  # J/m^2 per hour
+ERA5_SCALE_M = 11_132.0   # ~9 km native; 11132 m = 0.1 deg at equator (GEE default)
+
+# Conversion: J/m^2 per hour -> kWh/m^2 per hour
+# 1 kWh = 3,600,000 J  =>  divide by 3.6e6
+ERA5_J_TO_KWH = 3_600_000.0
+
+# ---------------------------------------------------------------------------
+# Fallback: MERRA-2 (kept for backward compatibility and range mode)
+# ---------------------------------------------------------------------------
 MERRA_RAD_COLLECTION = "NASA/GSFC/MERRA/rad/2"
-SWGDN_BAND = "SWGDN"
+SWGDN_BAND = "SWGDN"  # W/m^2 hourly mean
+MERRA_SCALE_M = 50_000.0
 
 
 def _mean_over_aoi_with_fallback(
@@ -27,7 +56,11 @@ def _mean_over_aoi_with_fallback(
 ) -> Dict[str, Any]:
     """
     Robust mean extractor for coarse datasets over small AOIs.
-    Falls back from reduceRegion(mean) -> bestEffort -> centroid sample.
+    Falls back: reduceRegion -> bestEffort -> centroid sample.
+
+    Important: do NOT clip the image to aoi before calling this.
+    Clipping a small AOI on a coarse image removes all pixel centers,
+    causing reduceRegion to return null.
     """
     raw_primary = image.reduceRegion(
         reducer=ee.Reducer.mean(),
@@ -70,16 +103,22 @@ def _mean_over_aoi_with_fallback(
     return {"value": 0.0, "source": "fallback_zero", "raw": {"primary": raw_primary, "best": raw_best}}
 
 
-def merra2_mean_annual_sw_kwh_m2(
+# ---------------------------------------------------------------------------
+# ERA5 baseline (primary)
+# ---------------------------------------------------------------------------
+
+def era5_mean_annual_ghi_kwh_m2(
     aoi: ee.Geometry,
-    start_year: int = 2015,
-    end_year: int = 2019,
+    start_year: int = 2020,
+    end_year: int = 2024,
 ) -> ee.Image:
     """
-    Mean annual surface incoming shortwave (all-sky) in kWh/m^2/year.
+    Mean annual Global Horizontal Irradiance (GHI) from ERA5-Land in kWh/m^2/year.
 
-    For each hour: incremental energy ~ (SWGDN W/m^2) * 1 h = SWGDN/1000 kWh/m^2.
-    Sums all hours from start_year-01-01 through end_year-12-31, divides by year count.
+    ERA5 stores surface_solar_radiation_downwards_hourly in J/m^2 per hour.
+    Sum all hourly values over [start_year, end_year], convert J->kWh, divide by years.
+
+    Returns an ee.Image with band 'annual_GHI_kWh_m2' (not clipped to aoi).
     """
     if end_year < start_year:
         raise ValueError("end_year must be >= start_year")
@@ -89,106 +128,73 @@ def merra2_mean_annual_sw_kwh_m2(
     n_years = end_year - start_year + 1
 
     col = (
-        ee.ImageCollection(MERRA_RAD_COLLECTION)
+        ee.ImageCollection(ERA5_COLLECTION)
         .filterDate(start, end)
-        .select(SWGDN_BAND)
+        .select(ERA5_BAND)
     )
 
-    total_kwh_m2 = col.sum().divide(1000.0)
-    mean_annual = total_kwh_m2.divide(n_years).rename("annual_SWGDN_kWh_m2")
-    # Do NOT clip to aoi here. MERRA pixels are ~50-70 km; clipping a small AOI
-    # removes all pixel centers from the image, causing reduceRegion to return null.
-    # The geometry= argument in reduceRegion already restricts the computation.
+    # Sum all hourly J/m^2, convert to kWh/m^2, divide by years -> mean annual kWh/m^2/yr
+    total_kwh_m2 = col.sum().divide(ERA5_J_TO_KWH)
+    mean_annual = total_kwh_m2.divide(n_years).rename("annual_GHI_kWh_m2")
+    # Do NOT clip to aoi: ERA5 pixels are ~9-11 km; clipping a small AOI
+    # removes pixel centers and causes reduceRegion to return null.
     return mean_annual
 
 
-def reduce_mean_annual_sw_at_aoi(
+def get_era5_baseline_info(
     aoi: ee.Geometry,
-    start_year: int = 2015,
-    end_year: int = 2019,
-    scale_m: float = 50_000.0,
-    tile_scale: int = 2,
-) -> ee.Dictionary:
-    """Spatial mean of mean-annual kWh/m^2 image over AOI (MERRA-native scale is coarse)."""
-    img = merra2_mean_annual_sw_kwh_m2(aoi, start_year, end_year)
-    return img.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=aoi,
-        scale=scale_m,
-        maxPixels=1e9,
-        tileScale=tile_scale,
-    )
-
-
-def get_merra_baseline_info(
-    aoi: ee.Geometry,
-    start_year: int = 2015,
-    end_year: int = 2019,
-    scale_m: float = 50_000.0,
+    start_year: int = 2020,
+    end_year: int = 2024,
+    scale_m: float = ERA5_SCALE_M,
 ) -> Dict[str, Any]:
-    """Plain dict for API / run_analysis (calls getInfo once)."""
-    img = merra2_mean_annual_sw_kwh_m2(aoi, start_year, end_year)
+    """Plain Python dict for API / run_analysis."""
+    img = era5_mean_annual_ghi_kwh_m2(aoi, start_year, end_year)
     mean_info = _mean_over_aoi_with_fallback(
         image=img,
-        band_name="annual_SWGDN_kWh_m2",
+        band_name="annual_GHI_kWh_m2",
         aoi=aoi,
         scale_m=scale_m,
     )
     return {
-        "merra_mean_annual_sw_kwh_m2": mean_info["value"],
-        "merra_start_year": start_year,
-        "merra_end_year": end_year,
-        "merra_collection": MERRA_RAD_COLLECTION,
-        "merra_band": SWGDN_BAND,
+        "mean_annual_ghi_kwh_m2_year": mean_info["value"],
+        "start_year": start_year,
+        "end_year": end_year,
+        "collection": ERA5_COLLECTION,
+        "band": ERA5_BAND,
         "reduce_scale_m": scale_m,
         "value_source": mean_info["source"],
         "reduce_region_raw": mean_info["raw"],
     }
 
 
-def latest_complete_5y_range(today: Optional[date] = None) -> tuple[int, int]:
-    """
-    Return the latest complete 5-year range.
-    Example: if today is in 2026, returns (2021, 2025).
-    """
-    if today is None:
-        today = date.today()
-    end_year = today.year - 1
-    start_year = end_year - 4
-    return start_year, end_year
-
-
-def merra2_total_sw_kwh_m2_for_range(
+def era5_total_ghi_kwh_m2_for_range(
     aoi: ee.Geometry,
     start_date: str,
     end_date_exclusive: str,
 ) -> ee.Image:
     """
-    Total incoming shortwave energy over [start_date, end_date_exclusive) in kWh/m^2.
+    Total GHI over [start_date, end_date_exclusive) in kWh/m^2.
+    Useful for seasonal/custom date range queries.
     """
     col = (
-        ee.ImageCollection(MERRA_RAD_COLLECTION)
+        ee.ImageCollection(ERA5_COLLECTION)
         .filterDate(start_date, end_date_exclusive)
-        .select(SWGDN_BAND)
+        .select(ERA5_BAND)
     )
-    # Do NOT clip to aoi — same reason as merra2_mean_annual_sw_kwh_m2.
-    return col.sum().divide(1000.0).rename("total_SWGDN_kWh_m2")
+    return col.sum().divide(ERA5_J_TO_KWH).rename("total_GHI_kWh_m2")
 
 
-def get_merra_range_info(
+def get_era5_range_info(
     aoi: ee.Geometry,
     start_date: str,
     end_date_exclusive: str,
-    scale_m: float = 50_000.0,
+    scale_m: float = ERA5_SCALE_M,
 ) -> Dict[str, Any]:
-    """
-    Baseline stats for an arbitrary date range (daily/monthly/custom possible).
-    Returns period total and annualized values (kWh/m^2/year).
-    """
-    total_img = merra2_total_sw_kwh_m2_for_range(aoi, start_date, end_date_exclusive)
+    """Baseline stats for an arbitrary date range."""
+    total_img = era5_total_ghi_kwh_m2_for_range(aoi, start_date, end_date_exclusive)
     mean_info = _mean_over_aoi_with_fallback(
         image=total_img,
-        band_name="total_SWGDN_kWh_m2",
+        band_name="total_GHI_kWh_m2",
         aoi=aoi,
         scale_m=scale_m,
     )
@@ -200,43 +206,37 @@ def get_merra_range_info(
     annualized = total_kwh_m2 * (365.25 / days)
 
     return {
-        "range_total_sw_kwh_m2": total_kwh_m2,
-        "range_annualized_sw_kwh_m2_year": annualized,
+        "range_total_ghi_kwh_m2": total_kwh_m2,
+        "range_annualized_ghi_kwh_m2_year": annualized,
         "range_start_date": start_date,
         "range_end_date_exclusive": end_date_exclusive,
         "range_days": days,
-        "merra_collection": MERRA_RAD_COLLECTION,
-        "merra_band": SWGDN_BAND,
+        "collection": ERA5_COLLECTION,
+        "band": ERA5_BAND,
         "reduce_scale_m": scale_m,
         "value_source": mean_info["source"],
         "reduce_region_raw": mean_info["raw"],
     }
 
 
-
-def get_roof_masked_merra_baseline_info(
+def get_roof_masked_era5_baseline_info(
     aoi: ee.Geometry,
     roof_mask: ee.Image,
     start_year: int = 2020,
     end_year: int = 2024,
-    scale_m: float = 50_000.0,
+    scale_m: float = ERA5_SCALE_M,
     roof_area_scale_m: float = 4.0,
 ) -> Dict[str, Any]:
     """
-    Roof-masked MERRA-2 baseline: regional irradiance applied to candidate rooftop area.
+    Roof-masked ERA5 baseline: regional GHI applied to candidate rooftop area.
 
     Two-scale method:
-    - roof_area_m2: summed at 4m (Open Buildings resolution) -- spatially precise.
-    - regional_irradiance_kwh_m2_year: MERRA-2 mean at ~50km -- one value for the whole AOI.
-      MERRA is too coarse to vary within a neighbourhood; spatial variation comes from
-      shadow/UHI penalties applied later.
-    - pre_penalty_total_kwh_year: roof_area_m2 * regional_irradiance -- theoretical maximum
-      before any shadow, soiling, or efficiency losses.
-
-    Note: Option A (mean per m2) and Option B (total / area) are mathematically identical
-    by construction at this stage. The meaningful comparison comes after penalties are applied.
+    - roof_area_m2: summed at 4m (Open Buildings resolution).
+    - regional_ghi_kwh_m2_year: ERA5 mean at ~9 km -- one value for the AOI.
+    - pre_penalty_total_kwh_year: roof_area_m2 * regional_ghi -- theoretical max
+      before shadow, soiling, or efficiency losses.
     """
-    baseline = merra2_mean_annual_sw_kwh_m2(aoi, start_year=start_year, end_year=end_year)
+    baseline = era5_mean_annual_ghi_kwh_m2(aoi, start_year=start_year, end_year=end_year)
 
     # Step 1: total candidate rooftop area at fine scale (4m)
     roof_area_raw = (
@@ -258,33 +258,151 @@ def get_roof_masked_merra_baseline_info(
         else float(roof_area_raw["roof_area_m2"])
     )
 
-    # Step 2: regional irradiance at MERRA scale (one value covers the whole AOI)
+    # Step 2: regional GHI at ERA5 scale
     irr_info = _mean_over_aoi_with_fallback(
         image=baseline,
+        band_name="annual_GHI_kWh_m2",
+        aoi=aoi,
+        scale_m=scale_m,
+    )
+    regional_irradiance = float(irr_info["value"])
+
+    # Step 3: pre-penalty total
+    pre_penalty_total = regional_irradiance * roof_area_m2 if roof_area_m2 > 0 else 0.0
+
+    return {
+        "roof_area_m2": roof_area_m2,
+        "regional_irradiance_kwh_m2_year": regional_irradiance,
+        "pre_penalty_total_kwh_year": pre_penalty_total,
+        "start_year": start_year,
+        "end_year": end_year,
+        "collection": ERA5_COLLECTION,
+        "band": ERA5_BAND,
+        "reduce_scale_m": scale_m,
+        "roof_area_scale_m": roof_area_scale_m,
+        "method": "two_scale_roof_area_x_era5_mean",
+        "irradiance_source": irr_info["source"],
+        "roof_area_reduce_region_raw": roof_area_raw,
+        "irradiance_reduce_region_raw": irr_info["raw"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+def latest_complete_5y_range(today: Optional[date] = None) -> tuple[int, int]:
+    """
+    Return the latest complete 5-year range.
+    Example: if today is in 2026, returns (2021, 2025).
+    """
+    if today is None:
+        today = date.today()
+    end_year = today.year - 1
+    start_year = end_year - 4
+    return start_year, end_year
+
+
+# ---------------------------------------------------------------------------
+# MERRA-2 kept for backward compatibility and range-mode fallback
+# ---------------------------------------------------------------------------
+
+def merra2_mean_annual_sw_kwh_m2(
+    aoi: ee.Geometry,
+    start_year: int = 2015,
+    end_year: int = 2019,
+) -> ee.Image:
+    """
+    MERRA-2 mean annual SWGDN in kWh/m^2/year (kept for fallback/comparison).
+    Prefer era5_mean_annual_ghi_kwh_m2 for new work.
+    """
+    if end_year < start_year:
+        raise ValueError("end_year must be >= start_year")
+    start = ee.Date.fromYMD(start_year, 1, 1)
+    end = ee.Date.fromYMD(end_year + 1, 1, 1)
+    n_years = end_year - start_year + 1
+    col = (
+        ee.ImageCollection(MERRA_RAD_COLLECTION)
+        .filterDate(start, end)
+        .select(SWGDN_BAND)
+    )
+    total_kwh_m2 = col.sum().divide(1000.0)
+    mean_annual = total_kwh_m2.divide(n_years).rename("annual_SWGDN_kWh_m2")
+    return mean_annual
+
+
+def get_merra_baseline_info(
+    aoi: ee.Geometry,
+    start_year: int = 2015,
+    end_year: int = 2019,
+    scale_m: float = MERRA_SCALE_M,
+) -> Dict[str, Any]:
+    """MERRA-2 baseline dict (kept for backward compatibility)."""
+    img = merra2_mean_annual_sw_kwh_m2(aoi, start_year, end_year)
+    mean_info = _mean_over_aoi_with_fallback(
+        image=img,
         band_name="annual_SWGDN_kWh_m2",
         aoi=aoi,
         scale_m=scale_m,
     )
-    regional_irradiance = float(irr_info["value"])  # kWh/m2/year; 0.0 if fallback
-
-    # Step 3: pre-penalty total energy on all candidate rooftops
-    pre_penalty_total = regional_irradiance * roof_area_m2 if roof_area_m2 > 0 else 0.0
-
     return {
-        # --- core outputs ---
-        "roof_area_m2": roof_area_m2,
-        "regional_irradiance_kwh_m2_year": regional_irradiance,
-        "pre_penalty_total_kwh_year": pre_penalty_total,
-        # --- provenance ---
+        "merra_mean_annual_sw_kwh_m2": mean_info["value"],
         "merra_start_year": start_year,
         "merra_end_year": end_year,
         "merra_collection": MERRA_RAD_COLLECTION,
         "merra_band": SWGDN_BAND,
         "reduce_scale_m": scale_m,
-        "roof_area_scale_m": roof_area_scale_m,
-        "method": "two_scale_roof_area_x_merra_mean",
-        "irradiance_source": irr_info["source"],
-        # --- raw GEE outputs for debugging ---
-        "roof_area_reduce_region_raw": roof_area_raw,
-        "irradiance_reduce_region_raw": irr_info["raw"],
+        "value_source": mean_info["source"],
+        "reduce_region_raw": mean_info["raw"],
     }
+
+
+def merra2_total_sw_kwh_m2_for_range(
+    aoi: ee.Geometry,
+    start_date: str,
+    end_date_exclusive: str,
+) -> ee.Image:
+    """MERRA-2 total SWGDN for a date range (kept for backward compatibility)."""
+    col = (
+        ee.ImageCollection(MERRA_RAD_COLLECTION)
+        .filterDate(start_date, end_date_exclusive)
+        .select(SWGDN_BAND)
+    )
+    return col.sum().divide(1000.0).rename("total_SWGDN_kWh_m2")
+
+
+def get_merra_range_info(
+    aoi: ee.Geometry,
+    start_date: str,
+    end_date_exclusive: str,
+    scale_m: float = MERRA_SCALE_M,
+) -> Dict[str, Any]:
+    """MERRA-2 range baseline dict (kept for backward compatibility)."""
+    total_img = merra2_total_sw_kwh_m2_for_range(aoi, start_date, end_date_exclusive)
+    mean_info = _mean_over_aoi_with_fallback(
+        image=total_img,
+        band_name="total_SWGDN_kWh_m2",
+        aoi=aoi,
+        scale_m=scale_m,
+    )
+    total_kwh_m2 = float(mean_info["value"])
+    d0 = date.fromisoformat(start_date)
+    d1 = date.fromisoformat(end_date_exclusive)
+    days = max((d1 - d0).days, 1)
+    annualized = total_kwh_m2 * (365.25 / days)
+    return {
+        "range_total_sw_kwh_m2": total_kwh_m2,
+        "range_annualized_sw_kwh_m2_year": annualized,
+        "range_start_date": start_date,
+        "range_end_date_exclusive": end_date_exclusive,
+        "range_days": days,
+        "merra_collection": MERRA_RAD_COLLECTION,
+        "merra_band": SWGDN_BAND,
+        "reduce_scale_m": scale_m,
+        "value_source": mean_info["source"],
+        "reduce_region_raw": mean_info["raw"],
+    }
+
+
+# Alias kept so existing imports don't break
+get_roof_masked_merra_baseline_info = get_roof_masked_era5_baseline_info

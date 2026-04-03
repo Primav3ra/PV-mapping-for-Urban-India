@@ -26,25 +26,28 @@ except ImportError:
         _HAS_ROOFTOPS = False
 
 try:
-    from irradiance_baseline import get_merra_baseline_info as _get_merra_baseline_info
-    from irradiance_baseline import get_merra_range_info as _get_merra_range_info
+    from irradiance_baseline import get_era5_baseline_info as _get_era5_baseline_info
+    from irradiance_baseline import get_era5_range_info as _get_era5_range_info
     from irradiance_baseline import latest_complete_5y_range as _latest_complete_5y_range
+    from irradiance_baseline import ERA5_SCALE_M as _ERA5_SCALE_M
     _HAS_IRRADIANCE = True
 except ImportError:
     try:
-        from scripts.irradiance_baseline import get_merra_baseline_info as _get_merra_baseline_info
-        from scripts.irradiance_baseline import get_merra_range_info as _get_merra_range_info
+        from scripts.irradiance_baseline import get_era5_baseline_info as _get_era5_baseline_info
+        from scripts.irradiance_baseline import get_era5_range_info as _get_era5_range_info
         from scripts.irradiance_baseline import latest_complete_5y_range as _latest_complete_5y_range
+        from scripts.irradiance_baseline import ERA5_SCALE_M as _ERA5_SCALE_M
         _HAS_IRRADIANCE = True
     except ImportError:
+        _ERA5_SCALE_M = 11_132.0
         _HAS_IRRADIANCE = False
 
 try:
-    from irradiance_baseline import get_roof_masked_merra_baseline_info as _get_roof_masked_merra_baseline_info
+    from irradiance_baseline import get_roof_masked_era5_baseline_info as _get_roof_masked_era5_baseline_info
     _HAS_ROOF_MASKED_IRRADIANCE = True
 except ImportError:
     try:
-        from scripts.irradiance_baseline import get_roof_masked_merra_baseline_info as _get_roof_masked_merra_baseline_info
+        from scripts.irradiance_baseline import get_roof_masked_era5_baseline_info as _get_roof_masked_era5_baseline_info
         _HAS_ROOF_MASKED_IRRADIANCE = True
     except ImportError:
         _HAS_ROOF_MASKED_IRRADIANCE = False
@@ -191,41 +194,37 @@ class SolarMappingUtils:
         aoi: ee.Geometry,
         start_year: int = 2020,
         end_year: int = 2024,
-        scale_m: float = 50_000.0,
+        scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
-        """
-        Mean annual surface incoming shortwave (all-sky) from MERRA-2 SWGDN, kWh/m^2/year.
-
-        Coarse grid (~50-70 km); use as regional climatology before rooftop penalties.
-        """
+        """ERA5 mean annual GHI (kWh/m^2/year). Method name kept for backward compatibility."""
         if not _HAS_IRRADIANCE:
             raise RuntimeError("irradiance_baseline module not found")
-        return _get_merra_baseline_info(
+        return _get_era5_baseline_info(
             aoi, start_year=start_year, end_year=end_year, scale_m=scale_m
         )
 
     def get_merra_latest_5y_baseline_stats(
         self,
         aoi: ee.Geometry,
-        scale_m: float = 50_000.0,
+        scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
-        """Latest complete 5-year mean annual MERRA baseline."""
+        """Latest complete 5-year mean annual ERA5 GHI baseline."""
         if not _HAS_IRRADIANCE:
             raise RuntimeError("irradiance_baseline module not found")
         start_year, end_year = _latest_complete_5y_range()
-        return _get_merra_baseline_info(aoi, start_year=start_year, end_year=end_year, scale_m=scale_m)
+        return _get_era5_baseline_info(aoi, start_year=start_year, end_year=end_year, scale_m=scale_m)
 
     def get_merra_range_stats(
         self,
         aoi: ee.Geometry,
         start_date: str,
         end_date_exclusive: str,
-        scale_m: float = 50_000.0,
+        scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
-        """Arbitrary date-range MERRA totals/annualized stats (daily/monthly/custom)."""
+        """Arbitrary date-range ERA5 GHI totals/annualized stats."""
         if not _HAS_IRRADIANCE:
             raise RuntimeError("irradiance_baseline module not found")
-        return _get_merra_range_info(
+        return _get_era5_range_info(
             aoi=aoi,
             start_date=start_date,
             end_date_exclusive=end_date_exclusive,
@@ -241,15 +240,15 @@ class SolarMappingUtils:
         min_height_m: float = 0.0,
         start_year: Optional[int] = None,
         end_year: Optional[int] = None,
-        scale_m: float = 50_000.0,
+        scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
         """
-        Pre-penalty rooftop baseline: candidate roof area (m2) x regional MERRA-2 irradiance.
+        Pre-penalty rooftop baseline: candidate roof area (m2) x regional ERA5 GHI.
 
         Returns:
-          roof_area_m2                  -- total candidate rooftop area at 4m resolution
-          regional_irradiance_kwh_m2_year -- MERRA-2 mean annual irradiance for the region
-          pre_penalty_total_kwh_year    -- theoretical max energy before shadow/soiling/efficiency
+          roof_area_m2                    -- total candidate rooftop area at 4m resolution
+          regional_irradiance_kwh_m2_year -- ERA5 mean annual GHI for the region (~9 km)
+          pre_penalty_total_kwh_year      -- theoretical max energy before shadow/soiling/efficiency
 
         Shadow and UHI penalties are applied in the next pipeline stage (scripts/penalties.py).
         """
@@ -259,7 +258,6 @@ class SolarMappingUtils:
         if start_year is None or end_year is None:
             start_year, end_year = _latest_complete_5y_range()
 
-        # Local imports to keep module-level import errors easier to diagnose.
         try:
             from rooftops import build_rooftop_candidate_mask, apply_terrain_exclusion
         except ImportError:
@@ -284,7 +282,7 @@ class SolarMappingUtils:
                 scale_m=4.0,
             )
 
-        return _get_roof_masked_merra_baseline_info(
+        return _get_roof_masked_era5_baseline_info(
             aoi=aoi,
             roof_mask=roof_mask,
             start_year=start_year,

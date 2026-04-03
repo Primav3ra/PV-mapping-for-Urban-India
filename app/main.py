@@ -11,7 +11,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from scripts.utility import SolarMappingUtils
-from scripts.irradiance_baseline import latest_complete_5y_range, merra2_mean_annual_sw_kwh_m2
+from scripts.irradiance_baseline import (
+    latest_complete_5y_range,
+    era5_mean_annual_ghi_kwh_m2,
+    ERA5_SCALE_M,
+)
 from scripts.penalties import shadow_retention_fraction, net_irradiance_image, per_building_yield
 from scripts.datasets import get_open_buildings_temporal, get_open_buildings_vector
 from scripts.rooftops import build_rooftop_candidate_mask, apply_terrain_exclusion
@@ -162,7 +166,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
     that one geometry. O(1) GEE calls regardless of AOI size or penalty count.
 
     Pipeline:
-      1. MERRA-2 regional irradiance (kWh/m2/year) -- one centroid sample
+      1. ERA5 regional GHI (kWh/m2/year) -- one centroid sample (~9 km)
       2. Shadow retention image from 2.5D building heights (4m)
       3. net_irradiance = baseline x shadow_retention (per pixel)
       4. Find the single building polygon at the clicked point
@@ -187,17 +191,17 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         if start_year is None or end_year is None:
             start_year, end_year = latest_complete_5y_range()
 
-        # -- 1. regional irradiance at centroid --
-        baseline_img = merra2_mean_annual_sw_kwh_m2(aoi, start_year=start_year, end_year=end_year)
+        # -- 1. regional GHI at centroid (ERA5, ~9 km) --
+        baseline_img = era5_mean_annual_ghi_kwh_m2(aoi, start_year=start_year, end_year=end_year)
         irr_sample = (
             baseline_img
-            .sample(region=centroid, scale=50_000, numPixels=1, geometries=False)
+            .sample(region=centroid, scale=ERA5_SCALE_M, numPixels=1, geometries=False)
             .first()
             .getInfo()
         )
         if irr_sample is None or "properties" not in irr_sample:
-            raise HTTPException(status_code=500, detail="Could not sample MERRA-2 irradiance at centroid.")
-        regional_irradiance = float(irr_sample["properties"].get("annual_SWGDN_kWh_m2", 0.0))
+            raise HTTPException(status_code=500, detail="Could not sample ERA5 irradiance at centroid.")
+        regional_irradiance = float(irr_sample["properties"].get("annual_GHI_kWh_m2", 0.0))
 
         # -- 2. building raster (raster for shadow model + roof mask) --
         buildings_raster = get_open_buildings_temporal(aoi, year=req.roof_year)
@@ -228,13 +232,13 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         )
 
         if target_building is None:
-            # No building polygon found at centroid -- return centroid stats only
             return {
                 "status": "no_building_at_point",
                 "message": "No Open Buildings polygon found at the selected point. Try clicking on a rooftop.",
                 "regional_irradiance_kwh_m2_year": regional_irradiance,
-                "merra_start_year": start_year,
-                "merra_end_year": end_year,
+                "irradiance_source": "ERA5",
+                "start_year": start_year,
+                "end_year": end_year,
                 "geojson": None,
             }
 
@@ -287,8 +291,9 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         return {
             "status": "ok",
             "regional_irradiance_kwh_m2_year": regional_irradiance,
-            "merra_start_year": start_year,
-            "merra_end_year": end_year,
+            "irradiance_source": "ERA5",
+            "start_year": start_year,
+            "end_year": end_year,
             "panel_efficiency": req.panel_efficiency,
             "performance_ratio": req.performance_ratio,
             # -- building identity --

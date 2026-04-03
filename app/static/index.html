@@ -8,11 +8,11 @@
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f9; }
-    #wrap { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+    #wrap { display: grid; grid-template-columns: 390px 1fr; height: 100vh; }
 
     /* ---- sidebar ---- */
     #left { background: #fff; padding: 14px; overflow-y: auto; border-right: 1px solid #ddd; display: flex; flex-direction: column; gap: 6px; }
-    h2 { margin: 0 0 4px; font-size: 15px; color: #1a1a2e; }
+    h2 { margin: 0 0 2px; font-size: 15px; color: #1a1a2e; }
     .section { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; background: #fafafa; }
     .section-title { font-size: 11px; font-weight: bold; text-transform: uppercase; color: #555; margin-bottom: 6px; letter-spacing: 0.5px; }
     label { display: block; margin-top: 6px; font-size: 12px; color: #444; }
@@ -28,25 +28,39 @@
     .btn-sm:hover { background: #dee2e6; }
     #status { font-size: 11px; color: #888; min-height: 16px; }
 
+    /* ---- unit toggle ---- */
+    .unit-toggle { display: flex; gap: 0; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }
+    .unit-toggle button { margin: 0; border-radius: 0; border: none; padding: 5px 10px; font-size: 11px; font-weight: normal; background: #f1f3f5; color: #333; flex: 1; }
+    .unit-toggle button.active { background: #1971c2; color: #fff; font-weight: bold; }
+
     /* ---- results ---- */
     #summaryBox { display: none; }
-    .stat { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; border-bottom: 1px solid #eee; }
+    .stat { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid #eee; }
     .stat:last-child { border-bottom: none; }
     .stat-label { color: #666; }
     .stat-value { font-weight: bold; color: #1a1a2e; }
+    .stat-value.highlight { color: #2b8a3e; font-size: 13px; }
+    .stat-note { font-size: 10px; color: #aaa; display: block; }
     pre { background: #0b1020; color: #cde2ff; padding: 10px; white-space: pre-wrap; font-size: 11px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
 
     /* ---- map ---- */
     #map { height: 100%; }
-    .building-popup { font-size: 12px; min-width: 180px; }
-    .building-popup b { display: block; margin-bottom: 4px; font-size: 13px; }
+    .building-popup { font-size: 12px; min-width: 200px; }
+    .building-popup b { display: block; margin-bottom: 6px; font-size: 13px; border-bottom: 1px solid #eee; padding-bottom: 4px; }
+    .building-popup .pop-row { display: flex; justify-content: space-between; padding: 2px 0; }
+    .building-popup .pop-val { font-weight: bold; }
+
+    /* ---- map layer toggle ---- */
+    .map-toggle { position: absolute; top: 10px; right: 10px; z-index: 1000; background: white; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); overflow: hidden; display: flex; }
+    .map-toggle button { border: none; padding: 7px 12px; font-size: 12px; cursor: pointer; background: #f8f9fa; color: #333; }
+    .map-toggle button.active { background: #1971c2; color: white; font-weight: bold; }
   </style>
 </head>
 <body>
 <div id="wrap">
   <div id="left">
     <h2>PV Mapping - Urban India</h2>
-    <p style="font-size:11px;color:#888;margin:0">Click the map to select a location. The AOI square is drawn around it.</p>
+    <p style="font-size:11px;color:#888;margin:0 0 4px">Click the map to select a location.</p>
 
     <div class="section">
       <div class="section-title">Location</div>
@@ -99,15 +113,23 @@
       <input id="confidence" type="number" step="0.05" value="0.7" min="0.5" max="1.0" />
     </div>
 
+    <div class="section">
+      <div class="section-title">Display units</div>
+      <label style="margin-top:0">Energy output</label>
+      <div class="unit-toggle">
+        <button id="unitKwh" class="active" onclick="setUnit('kWh')">kWh</button>
+        <button id="unitMwh" onclick="setUnit('MWh')">MWh</button>
+      </div>
+    </div>
+
     <button class="btn-primary" id="runBaselineBtn">Run baseline (AOI summary)</button>
-    <button class="btn-secondary" id="runYieldBtn">Run per-building yield (slower)</button>
+    <button class="btn-secondary" id="runYieldBtn">Run per-building yield</button>
     <div id="status"></div>
 
     <div class="section" id="summaryBox">
-      <div class="section-title">AOI Summary</div>
+      <div class="section-title" id="summaryTitle">AOI Summary</div>
       <div id="summaryStats"></div>
     </div>
-
 
     <div class="section">
       <div class="section-title">Raw API response</div>
@@ -115,17 +137,97 @@
     </div>
   </div>
 
-  <div id="map"></div>
+  <div id="map">
+    <div class="map-toggle">
+      <button id="btnStreet" class="active" onclick="setBasemap('street')">Street</button>
+      <button id="btnSatellite" onclick="setBasemap('satellite')">Satellite</button>
+      <button id="btnHybrid" onclick="setBasemap('hybrid')">Hybrid</button>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  // ---- map setup ----
-  const map = L.map('map').setView([28.62, 77.09], 13);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
+  // ---- basemap layers ----
+  const basemaps = {
+    street: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+    }),
+    satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
+    }),
+    hybrid: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19, attribution: 'Tiles &copy; Esri'
+    }),
+  };
+  // hybrid labels overlay
+  const labelsLayer = L.tileLayer('https://stamen-tiles-{s}.a.ssl.fastly.net/toner-labels/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19, opacity: 0.7
+  });
 
+  const map = L.map('map').setView([28.62, 77.09], 14);
+  basemaps.street.addTo(map);
+  let currentBasemap = 'street';
+
+  function setBasemap(name) {
+    Object.values(basemaps).forEach(l => { if (map.hasLayer(l)) map.removeLayer(l); });
+    if (map.hasLayer(labelsLayer)) map.removeLayer(labelsLayer);
+    basemaps[name].addTo(map);
+    if (name === 'hybrid') labelsLayer.addTo(map);
+    currentBasemap = name;
+    document.querySelectorAll('.map-toggle button').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn' + name.charAt(0).toUpperCase() + name.slice(1)).classList.add('active');
+  }
+
+  // ---- unit state ----
+  let energyUnit = 'kWh';
+  function setUnit(u) {
+    energyUnit = u;
+    document.getElementById('unitKwh').classList.toggle('active', u === 'kWh');
+    document.getElementById('unitMwh').classList.toggle('active', u === 'MWh');
+    // re-render last card if present
+    if (window._lastCardData) {
+      if (window._lastCardType === 'building') showBuildingCard(window._lastCardData);
+      else showSummary(window._lastCardData);
+    }
+  }
+
+  // ---- format numbers cleanly ----
+  function fmtEnergy(kwh) {
+    if (kwh == null) return '-';
+    if (energyUnit === 'MWh') return (kwh / 1000).toFixed(1) + ' MWh/yr';
+    // kWh mode: use plain kWh up to 999,999; then MWh with note
+    if (Math.abs(kwh) >= 1e6) return (kwh / 1e6).toFixed(2) + ' GWh/yr';
+    if (Math.abs(kwh) >= 1e3) return Math.round(kwh).toLocaleString() + ' kWh/yr';
+    return kwh.toFixed(0) + ' kWh/yr';
+  }
+
+  function fmtIrr(v) {
+    if (v == null) return '-';
+    return v.toFixed(0) + ' kWh/m\u00b2/yr';
+  }
+
+  function fmtArea(m2) {
+    if (m2 == null) return '-';
+    if (m2 >= 1e6) return (m2 / 1e6).toFixed(2) + ' km\u00b2';
+    if (m2 >= 1e4) return (m2 / 1e4).toFixed(2) + ' ha';
+    return Math.round(m2).toLocaleString() + ' m\u00b2';
+  }
+
+  function fmtKwp(roofM2, efficiency) {
+    if (!roofM2 || !efficiency) return '-';
+    return (roofM2 * efficiency).toFixed(1) + ' kWp';
+  }
+
+  function fmtCo2(kwhYear) {
+    // India grid emission factor: ~0.82 kg CO2/kWh (CEA 2022)
+    if (!kwhYear) return '-';
+    const kg = kwhYear * 0.82;
+    if (kg >= 1000) return (kg / 1000).toFixed(1) + ' tCO\u2082/yr';
+    return kg.toFixed(0) + ' kg CO\u2082/yr';
+  }
+
+  // ---- map interaction ----
   const latEl = document.getElementById('lat');
   const lonEl = document.getElementById('lon');
   const halfSizeEl = document.getElementById('halfSize');
@@ -158,7 +260,7 @@
       document.getElementById('startYear').value = p.latest5y.start_year;
       document.getElementById('endYear').value = p.latest5y.end_year;
       window._presets = p.seasonal_examples;
-    } catch (e) { /* server may not be running yet */ }
+    } catch (e) {}
   }
 
   function setDatePreset(k) {
@@ -173,7 +275,7 @@
   document.getElementById('presetMonsoon').onclick = () => setDatePreset('monsoon');
   document.getElementById('presetDay').onclick = () => setDatePreset('single_day');
 
-  // ---- shared payload builder ----
+  // ---- shared payload ----
   function basePayload() {
     return {
       lat: parseFloat(latEl.value),
@@ -201,6 +303,8 @@
       const data = await r.json();
       document.getElementById('out').textContent = JSON.stringify(data, null, 2);
       statusEl.textContent = 'Baseline done.';
+      window._lastCardData = data;
+      window._lastCardType = 'summary';
       showSummary(data);
     } catch (e) {
       statusEl.textContent = 'Error: ' + e.message;
@@ -209,32 +313,30 @@
 
   function showSummary(data) {
     const box = document.getElementById('summaryBox');
-    const stats = document.getElementById('summaryStats');
     box.style.display = 'block';
+    document.getElementById('summaryTitle').textContent = 'AOI Summary';
     const rb = data.roof_baseline || {};
     const rt = data.rooftop || {};
-    const ab = data.aoi_baseline || data.range_baseline || {};
+    const efficiency = parseFloat(document.getElementById('efficiency').value) || 0.18;
+    const pr = parseFloat(document.getElementById('pr').value) || 0.80;
+    const estimatedYield = rb.pre_penalty_total_kwh_year ? rb.pre_penalty_total_kwh_year * efficiency * pr : null;
     const rows = [
-      ['Rooftop area', fmt(rt.rooftop_candidate_area_m2, 'm²')],
-      ['AOI area', fmt(rt.aoi_area_km2, 'km²')],
-      ['Regional irradiance', fmt(rb.regional_irradiance_kwh_m2_year, 'kWh/m²/yr')],
-      ['Pre-penalty total', fmt(rb.pre_penalty_total_kwh_year, 'kWh/yr')],
+      ['Rooftop area', fmtArea(rt.rooftop_candidate_area_m2)],
+      ['AOI area', fmtArea((rt.aoi_area_km2 || 0) * 1e6)],
+      ['Regional irradiance', fmtIrr(rb.regional_irradiance_kwh_m2_year), 'ERA5 GHI (pre-penalty)'],
+      ['Pre-penalty total', fmtEnergy(rb.pre_penalty_total_kwh_year), 'All rooftops, no losses applied'],
+      ['Est. yield (all rooftops)', fmtEnergy(estimatedYield), `At ${(efficiency*100).toFixed(0)}% eff. \u00d7 ${(pr*100).toFixed(0)}% PR`],
+      ['Est. CO\u2082 offset', fmtCo2(estimatedYield), 'India grid factor 0.82 kg/kWh'],
       ['Irradiance source', rb.irradiance_source || '-'],
     ];
-    stats.innerHTML = rows.map(([l, v]) => `<div class="stat"><span class="stat-label">${l}</span><span class="stat-value">${v}</span></div>`).join('');
-  }
-
-  function fmt(v, unit) {
-    if (v == null || v === undefined) return '-';
-    if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(2) + ' G' + unit;
-    if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(2) + ' M' + unit;
-    if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + ' k' + unit;
-    return v.toFixed(1) + ' ' + unit;
+    document.getElementById('summaryStats').innerHTML = rows.map(([l, v, note]) =>
+      `<div class="stat"><span class="stat-label">${l}${note ? `<span class="stat-note">${note}</span>` : ''}</span><span class="stat-value">${v}</span></div>`
+    ).join('');
   }
 
   // ---- per-building yield run ----
   document.getElementById('runYieldBtn').onclick = async () => {
-    statusEl.textContent = 'Finding building at selected point and computing yield...';
+    statusEl.textContent = 'Finding building at selected point...';
     const payload = {
       ...basePayload(),
       panel_efficiency: parseFloat(document.getElementById('efficiency').value),
@@ -261,7 +363,9 @@
         building_confidence: data.building_confidence,
       }, null, 2);
 
-      statusEl.textContent = `Done. Annual yield: ${fmt(data.annual_yield_kwh, 'kWh/yr')} | Shadow: ${data.mean_shadow_fraction != null ? (data.mean_shadow_fraction * 100).toFixed(1) + '%' : 'n/a'}`;
+      statusEl.textContent = `Done. Yield: ${fmtEnergy(data.annual_yield_kwh)} | Shadow: ${data.mean_shadow_fraction != null ? (data.mean_shadow_fraction * 100).toFixed(1) + '%' : 'n/a'}`;
+      window._lastCardData = data;
+      window._lastCardType = 'building';
       showBuildingCard(data);
       if (data.geojson) renderBuildingLayer(data.geojson);
     } catch (e) {
@@ -271,20 +375,26 @@
 
   function showBuildingCard(data) {
     const box = document.getElementById('summaryBox');
-    const stats = document.getElementById('summaryStats');
     box.style.display = 'block';
-    document.querySelector('#summaryBox .section-title').textContent = 'Selected Building';
+    document.getElementById('summaryTitle').textContent = 'Selected Building';
+    const eff = data.panel_efficiency || 0.18;
+    const pr = data.performance_ratio || 0.80;
+    const kwp = data.roof_area_m2 ? data.roof_area_m2 * eff : null;
     const rows = [
-      ['Annual yield', fmt(data.annual_yield_kwh, 'kWh/yr')],
-      ['Roof area', fmt(data.roof_area_m2, 'm²')],
-      ['Net irradiance', fmt(data.net_irradiance_kwh_m2_year, 'kWh/m²/yr')],
+      ['Annual yield', fmtEnergy(data.annual_yield_kwh), null, true],
+      ['Estimated capacity', kwp ? kwp.toFixed(1) + ' kWp' : '-', `At ${(eff*100).toFixed(0)}% panel efficiency`],
+      ['CO\u2082 offset', fmtCo2(data.annual_yield_kwh), 'India grid 0.82 kg CO\u2082/kWh'],
+      ['Roof area', fmtArea(data.roof_area_m2)],
+      ['Net irradiance', fmtIrr(data.net_irradiance_kwh_m2_year), 'After shadow penalty'],
       ['Shadow fraction', data.mean_shadow_fraction != null ? (data.mean_shadow_fraction * 100).toFixed(1) + '%' : '-'],
-      ['Regional irradiance', fmt(data.regional_irradiance_kwh_m2_year, 'kWh/m²/yr')],
-      ['Panel efficiency', ((data.panel_efficiency || 0.18) * 100).toFixed(0) + '%'],
-      ['Performance ratio', ((data.performance_ratio || 0.80) * 100).toFixed(0) + '%'],
+      ['Regional irradiance', fmtIrr(data.regional_irradiance_kwh_m2_year), 'ERA5 GHI (pre-penalty)'],
+      ['Panel efficiency', (eff * 100).toFixed(0) + '%'],
+      ['Performance ratio', (pr * 100).toFixed(0) + '%'],
       ['Building confidence', data.building_confidence != null ? (data.building_confidence * 100).toFixed(0) + '%' : '-'],
     ];
-    stats.innerHTML = rows.map(([l, v]) => `<div class="stat"><span class="stat-label">${l}</span><span class="stat-value">${v}</span></div>`).join('');
+    document.getElementById('summaryStats').innerHTML = rows.map(([l, v, note, hi]) =>
+      `<div class="stat"><span class="stat-label">${l}${note ? `<span class="stat-note">${note}</span>` : ''}</span><span class="stat-value${hi ? ' highlight' : ''}">${v}</span></div>`
+    ).join('');
   }
 
   function renderBuildingLayer(geojson) {
@@ -300,18 +410,18 @@
       }),
       onEachFeature: (feature, layer) => {
         const p = feature.properties || {};
-        const yieldVal = p.annual_yield_kwh != null ? fmt(p.annual_yield_kwh, 'kWh/yr') : 'n/a';
-        const area = p.roof_area_m2 != null ? fmt(p.roof_area_m2, 'm²') : 'n/a';
-        const irr = p.net_irradiance_kwh_m2_year != null ? p.net_irradiance_kwh_m2_year.toFixed(0) + ' kWh/m²/yr' : 'n/a';
-        const shadow = p.mean_shadow_fraction != null ? (p.mean_shadow_fraction * 100).toFixed(1) + '%' : 'n/a';
+        const eff = parseFloat(document.getElementById('efficiency').value) || 0.18;
+        const kwp = p.roof_area_m2 ? (p.roof_area_m2 * eff).toFixed(1) + ' kWp' : 'n/a';
         layer.bindPopup(`
           <div class="building-popup">
             <b>Selected Building</b>
-            <div>Annual yield: <b>${yieldVal}</b></div>
-            <div>Roof area: ${area}</div>
-            <div>Net irradiance: ${irr}</div>
-            <div>Shadow fraction: ${shadow}</div>
-            <div>Confidence: ${p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : 'n/a'}</div>
+            <div class="pop-row"><span>Annual yield</span><span class="pop-val">${fmtEnergy(p.annual_yield_kwh)}</span></div>
+            <div class="pop-row"><span>Capacity</span><span class="pop-val">${kwp}</span></div>
+            <div class="pop-row"><span>CO\u2082 offset</span><span class="pop-val">${fmtCo2(p.annual_yield_kwh)}</span></div>
+            <div class="pop-row"><span>Roof area</span><span class="pop-val">${fmtArea(p.roof_area_m2)}</span></div>
+            <div class="pop-row"><span>Net irradiance</span><span class="pop-val">${fmtIrr(p.net_irradiance_kwh_m2_year)}</span></div>
+            <div class="pop-row"><span>Shadow</span><span class="pop-val">${p.mean_shadow_fraction != null ? (p.mean_shadow_fraction * 100).toFixed(1) + '%' : 'n/a'}</span></div>
+            <div class="pop-row"><span>Confidence</span><span class="pop-val">${p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : 'n/a'}</span></div>
           </div>
         `).openPopup();
       }
