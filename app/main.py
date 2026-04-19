@@ -11,8 +11,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from scripts.utility import SolarMappingUtils
-from scripts.irradiance_baseline import sample_era5_period_ghi_kwh_m2_at_point, ERA5_SCALE_M
-from scripts.penalties import shadow_retention_fraction, net_irradiance_image
+from scripts.irradiance_baseline import (
+    sample_era5_period_ghi_kwh_m2_at_point,
+    sample_era5_beam_fraction_at_point,
+    ERA5_SCALE_M,
+)
+from scripts.penalties import (
+    net_irradiance_image,
+    UHIPenalty, SoilingPenalty, ShadowPenalty,
+)
 from scripts.solar_geometry import (
     solar_positions_yearly,
     solar_positions_quarterly,
@@ -230,7 +237,7 @@ def compute_baseline(req: BaselineRequest) -> Dict[str, Any]:
 
         if mode == "yearly":
             y = int(win["calendar_year"])
-            roof_baseline = utils.get_roof_masked_merra_baseline_stats(
+            roof_baseline = utils.get_roof_masked_era5_baseline_stats(
                 aoi=aoi,
                 exclusion_mask=exclusion,
                 roof_year=req.roof_year,
@@ -243,7 +250,7 @@ def compute_baseline(req: BaselineRequest) -> Dict[str, Any]:
             roof_baseline["calendar_year"] = y
             roof_baseline["start_date"] = s
             roof_baseline["end_date_exclusive"] = e
-            aoibaseline = utils.get_merra_baseline_stats(aoi, start_year=y, end_year=y)
+            aoibaseline = utils.get_era5_baseline_stats(aoi, start_year=y, end_year=y)
 
         elif mode == "quarterly":
             roof_baseline = utils.get_roof_masked_era5_baseline_for_date_range_stats(
@@ -260,7 +267,7 @@ def compute_baseline(req: BaselineRequest) -> Dict[str, Any]:
             roof_baseline["quarter"] = win["quarter"]
             roof_baseline["start_date"] = s
             roof_baseline["end_date_exclusive"] = e
-            range_info = utils.get_merra_range_stats(aoi, start_date=s, end_date_exclusive=e)
+            range_info = utils.get_era5_range_stats(aoi, start_date=s, end_date_exclusive=e)
 
         else:
             roof_baseline = utils.get_roof_masked_era5_baseline_for_date_range_stats(
@@ -275,7 +282,7 @@ def compute_baseline(req: BaselineRequest) -> Dict[str, Any]:
             roof_baseline["baseline_time_mode"] = "daily"
             roof_baseline["start_date"] = s
             roof_baseline["end_date_exclusive"] = e
-            range_info = utils.get_merra_range_stats(aoi, start_date=s, end_date_exclusive=e)
+            range_info = utils.get_era5_range_stats(aoi, start_date=s, end_date_exclusive=e)
 
         return {
             "status": "ok",
@@ -368,8 +375,24 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         exclusion = ee.Terrain.products(dem).select("slope").lt(30)
         roof_mask = apply_terrain_exclusion(roof_mask, exclusion, buildings_raster, scale_m=4.0)
 
-        retention = shadow_retention_fraction(building_height, solar_positions=solar_positions)
-        net_irr = net_irradiance_image(regional_ghi_kwh_m2_period, retention)
+        # Shadow frequency (per-pixel, insolation-weighted, data-driven from building heights)
+        shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=solar_positions)
+
+        # Beam fraction: direct / GHI from ERA5 HOURLY -- used to correct shadow losses.
+        # Only the beam component is blocked by shadows; diffuse is unaffected for rooftops.
+        beam_info = sample_era5_beam_fraction_at_point(centroid, s, e)
+        beam_fraction = float(beam_info["beam_fraction"])
+
+        uhi_info = UHIPenalty.stats(aoi, s)
+        soiling_info = SoilingPenalty.stats(aoi, s)
+
+        net_irr = net_irradiance_image(
+            regional_ghi_kwh_m2_period,
+            shadow_freq,
+            beam_fraction=beam_fraction,
+            uhi_derate=uhi_info["uhi_derate_factor"],
+            soiling_retention=soiling_info["soiling_retention_factor"],
+        )
 
         target_building = (
             get_open_buildings_vector(aoi, confidence_threshold=req.building_confidence)
@@ -422,7 +445,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         )
 
         shadow_stats = (
-            retention
+            shadow_freq
             .reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=building_geom,
@@ -434,10 +457,16 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
 
         total_energy_kwh = (stats.get("energy_kwh_pixel") or 0.0) * req.panel_efficiency * req.performance_ratio
         roof_area_m2 = roof_area_stats.get("roof_candidate") or 0.0
-        mean_shadow_retention = shadow_stats.get("shadow_retention")
-        mean_shadow_fraction = (1.0 - mean_shadow_retention) if mean_shadow_retention is not None else None
+        mean_shadow_frequency = shadow_stats.get("shadow_frequency")
+        mean_shadow_fraction = mean_shadow_frequency  # shadow_freq IS the fraction in shadow
+        mean_shadow_retention = (
+            round(1.0 - mean_shadow_frequency * beam_fraction, 4)
+            if mean_shadow_frequency is not None else None
+        )
+        combined_derate = uhi_info["uhi_derate_factor"] * soiling_info["soiling_retention_factor"]
         net_irr_mean = (
-            (regional_ghi_kwh_m2_period * mean_shadow_retention) if mean_shadow_retention is not None else None
+            regional_ghi_kwh_m2_period * combined_derate * mean_shadow_retention
+            if mean_shadow_retention is not None else None
         )
 
         out = {
@@ -458,8 +487,18 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             "roof_area_m2": roof_area_m2,
             "mean_shadow_fraction": mean_shadow_fraction,
             "mean_shadow_retention": mean_shadow_retention,
+            "beam_fraction": beam_fraction,
+            "diffuse_fraction": beam_info["diffuse_fraction"],
+            "beam_fraction_source": beam_info["source"],
+            "uhi_derate_factor": uhi_info["uhi_derate_factor"],
+            "delta_t_uhi_celsius": uhi_info["delta_t_uhi_celsius"],
+            "soiling_retention_factor": soiling_info["soiling_retention_factor"],
+            "mean_aod_550nm": soiling_info["mean_aod_550nm"],
+            "combined_derate_factor": round(combined_derate, 5),
             "net_irradiance_kwh_m2_period": net_irr_mean,
             "period_yield_kwh": total_energy_kwh,
+            "uhi_penalty": uhi_info,
+            "soiling_penalty": soiling_info,
             "geojson": {
                 "type": "FeatureCollection",
                 "features": [{
@@ -468,6 +507,8 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
                         **building_props,
                         "roof_area_m2": roof_area_m2,
                         "mean_shadow_fraction": mean_shadow_fraction,
+                        "uhi_derate_factor": uhi_info["uhi_derate_factor"],
+                        "soiling_retention_factor": soiling_info["soiling_retention_factor"],
                         "net_irradiance_kwh_m2_period": net_irr_mean,
                         "period_yield_kwh": total_energy_kwh,
                     }

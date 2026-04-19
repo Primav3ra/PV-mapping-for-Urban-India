@@ -82,24 +82,24 @@ class SolarMappingUtils:
     # Irradiance baselines
     # ------------------------------------------------------------------
 
-    def get_merra_baseline_stats(
+    def get_era5_baseline_stats(
         self,
         aoi: ee.Geometry,
         start_year: int = 2020,
         end_year: int = 2024,
         scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
-        """ERA5 annual GHI stats (method name kept for API compatibility)."""
+        """ERA5 annual GHI stats."""
         return _get_era5_baseline_info(aoi, start_year=start_year, end_year=end_year, scale_m=scale_m)
 
-    def get_merra_range_stats(
+    def get_era5_range_stats(
         self,
         aoi: ee.Geometry,
         start_date: str,
         end_date_exclusive: str,
         scale_m: float = 11_132.0,
     ) -> Dict[str, Any]:
-        """ERA5 period-range GHI stats (method name kept for API compatibility)."""
+        """ERA5 period-range GHI stats."""
         return _get_era5_range_info(aoi, start_date=start_date, end_date_exclusive=end_date_exclusive, scale_m=scale_m)
 
     # ------------------------------------------------------------------
@@ -120,7 +120,7 @@ class SolarMappingUtils:
             mask = apply_terrain_exclusion(mask, exclusion_mask=exclusion_mask, buildings=buildings, scale_m=4.0)
         return mask
 
-    def get_roof_masked_merra_baseline_stats(
+    def get_roof_masked_era5_baseline_stats(
         self,
         aoi: ee.Geometry,
         exclusion_mask: Optional[ee.Image] = None,

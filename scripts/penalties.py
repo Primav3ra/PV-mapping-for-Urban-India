@@ -1,42 +1,46 @@
 """
 Penalty layers applied to the ERA5 baseline irradiance at 4m resolution.
 
-Pipeline:
-  baseline_irradiance (ERA5, uniform over AOI)
-  x shadow_retention_fraction  (1 - shadow_fraction, from 2.5D building heights)
-  = net_irradiance_kwh_m2_period  (spatially varying, per pixel)
+Three independent penalty classes:
+  ShadowPenalty  -- 2.5D building-height shadow model   (Open Buildings raster, 4m)
+  UHIPenalty     -- Temperature derate from UHI effect  (MODIS LST, 1km)
+  SoilingPenalty -- Dust/soiling derate from MODIS MAIAC AOD (1km, 550nm)
 
-Shadow model (2.5D height-proportional):
-  For a given solar geometry (altitude, azimuth), a building of height H at pixel Q
-  casts a shadow of length L = H / tan(solar_altitude) in the direction opposite to
-  the sun azimuth. Any pixel P within distance L of Q (in the shadow direction) is
-  marked as in shadow.
+Combined net energy formula:
+  E_net = GHI_period
+          * shadow_retention_fraction   [ShadowPenalty,  per-pixel EE image, 0-1]
+          * uhi_derate_factor           [UHIPenalty,     scalar ~0.97-1.00]
+          * soiling_retention_factor    [SoilingPenalty, scalar ~0.94-1.00]
+          * panel_efficiency * PR * roof_area_m2
 
-  Implementation:
-    1. Compute shadow_length_image = building_height / tan(altitude)  [metres per pixel]
-    2. Dilate shadow_length_image using focal_max with kernel radius =
-       max_expected_shadow_length. This spreads each building's shadow by its actual
-       computed length, using the building's own height -- NOT a fixed representative height.
-    3. A pixel P is in shadow if its dilated shadow-length value >= distance to the
-       nearest casting building in the shadow direction.
-    4. Simplified as: dilated_shadow_length_px >= 1 (i.e. shadow reaches at least
-       this pixel) AND the casting neighbour is taller than P (prevents self-shadow).
+Research basis:
+  Shadow  : 2.5D geometric shadow casting. Known approximations documented in
+            ShadowPenalty class docstring.
+            Shadow frequency image is data-driven from Open Buildings 2.5D at 4m.
+            Beam fraction is sampled from ERA5 HOURLY direct radiation band and
+            applied so only the beam component is attenuated by shadows:
+              net = GHI * (1 - shadow_frequency * beam_fraction)
+            Diffuse (~30-45 % of GHI in urban India) reaches rooftops from the
+            open sky hemisphere and is NOT blocked by surrounding buildings
+            (rooftop Sky View Factor ~0.85-0.95; SVF correction deferred).
 
-  Positions: 18 solar positions covering solstices, equinoxes, 6 times of day each.
-  Weighting: each position weighted by sin(solar_altitude), proportional to the
-  irradiance available at that sun angle. Low-sun morning/winter positions contribute
-  very little energy and are down-weighted accordingly.
+  UHI     : De Soto et al. (2006) / IEC 60891 temperature-coefficient derating.
+              P_loss = gamma * delta_T   [gamma ~ -0.004 /degC for c-Si]
+            UHI intensity delta_T estimated from MODIS daytime LST minus a 20 km
+            focal-mean background (removes the regional temperature gradient).
+            Observed UHI in Indian cities: 2-6 degC
+            (Mohan et al. 2011; Bhati & Mohan 2018).
+            Expected derate range: ~0.99 (2 degC) to ~0.976 (6 degC).
 
-Known approximations (documented for ML calibration stage):
-  - focal_max kernel is circular, not directional. A directional kernel (along shadow az)
-    would be more accurate but is not natively supported in GEE. The circular kernel
-    slightly overestimates shadow area (~5-10%).
-  - Diffuse irradiance (~30% of GHI) cannot be blocked by a single shadow caster;
-    treating it as fully blockable overestimates shadow loss by up to ~10% of that fraction.
-    Net effect: ~3-5% overestimate of shadow loss.
-  - These known biases are the target for the ML bias-correction module.
+  Soiling : MODIS MAIAC AOD at 550 nm (MCD19A2 v061; Lyapustin et al. 2011).
+            Direct measure of atmospheric aerosol column loading -- the actual
+            driver of dry-deposition soiling on PV cover glass.
+              soiling_loss = mean_AOD_550nm * SOILING_COEFFICIENT
+            SOILING_COEFFICIENT = 0.08 /AOD_unit/year (Kimber et al. 2006;
+            Sayyah et al. 2014; Mani & Pillai 2010).
+            No output cap: loss follows directly from the measured AOD.
+            Urban India AOD (0.5-1.2) is 3-5x rural; a genuine urban penalty.
 """
-
 from __future__ import annotations
 
 import math
@@ -45,210 +49,457 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
-# Solar positions: solstices + equinoxes x 6 times of day (18 total)
-# Delhi latitude ~28.6 N
-#
-# Each entry: (solar_altitude_deg, solar_azimuth_deg_from_north, insolation_weight)
-# insolation_weight = sin(altitude_rad), normalised so weights sum to 1.
-# This gives each position its proportional contribution to annual energy.
-#
-# Solar positions computed for Delhi (28.6 N):
-#   Summer solstice (Jun 21): noon altitude = 90 - 28.6 + 23.5 = 84.9 deg
-#   Winter solstice (Dec 21): noon altitude = 90 - 28.6 - 23.5 = 37.9 deg
-#   Equinox (Mar/Sep 21):     noon altitude = 90 - 28.6        = 61.4 deg
+# Helpers shared across penalty classes
 # ---------------------------------------------------------------------------
+
+def _reduce_mean(image: ee.Image, band: str, aoi: ee.Geometry, scale: float) -> Optional[float]:
+    """Mean of a single band over AOI. Returns None if no valid pixels."""
+    raw = image.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=aoi,
+        scale=scale,
+        maxPixels=1e9,
+        bestEffort=True,
+    ).getInfo()
+    val = (raw or {}).get(band)
+    return float(val) if val is not None else None
+
 
 def _make_solar_positions() -> List[Tuple[float, float, float]]:
     """
-    Build 18 representative solar positions (solstice x2, equinox x1, 6 times each).
-    Returns list of (altitude_deg, azimuth_deg, raw_weight).
-    Raw weights = sin(alt); caller normalises.
-
-    Times of day: dawn(+1h), morning(+3h), late-morning(+5h),
-                  early-afternoon(+7h), afternoon(+9h), dusk(+11h)
-    relative to sunrise. Symmetric about solar noon -> azimuth east/west pairs.
-
-    Altitude and azimuth values are physically derived for Delhi.
+    18 representative (alt_deg, az_deg, weight) positions: solstices x2, equinox x1,
+    6 times of day each. weight = sin(alt_rad); equinox doubled for spring+autumn.
+    Weights normalised to sum = 1. Solar geometry for Delhi 28.6 N.
     """
-    # (season_label, noon_alt, [morning altitudes], [morning azimuths E side])
-    # Azimuth for afternoon = 360 - morning_az (symmetric about 180)
     seasons = [
-        # Summer solstice
         ("summer", [
             (8.0,  69.0), (28.0,  84.0), (58.0, 100.0),
             (84.0, 180.0),
             (58.0, 260.0), (28.0, 276.0), (8.0, 291.0),
         ]),
-        # Winter solstice
         ("winter", [
             (3.0, 120.0), (14.0, 136.0), (28.0, 150.0),
             (38.0, 180.0),
             (28.0, 210.0), (14.0, 224.0), (3.0, 240.0),
         ]),
-        # Equinox (used twice -- spring + autumn -- so double weight)
         ("equinox", [
             (5.0,  90.0), (21.0,  98.0), (44.0, 112.0),
             (62.0, 180.0),
             (44.0, 248.0), (21.0, 262.0), (5.0, 270.0),
         ]),
     ]
-
     positions: List[Tuple[float, float, float]] = []
-    for _label, entries in seasons:
-        # Equinox counts twice (represents spring + autumn)
-        repeat = 2 if _label == "equinox" else 1
+    for label, entries in seasons:
+        repeat = 2 if label == "equinox" else 1
         for alt, az in entries:
             if alt < 2.0:
-                continue  # below 2 deg: negligible irradiance, skip
-            weight = math.sin(math.radians(alt)) * repeat
-            positions.append((alt, az, weight))
-
-    # Normalise weights
+                continue
+            positions.append((alt, az, math.sin(math.radians(alt)) * repeat))
     total = sum(w for _, _, w in positions)
-    return [(alt, az, w / total) for alt, az, w in positions]
-
-
-DELHI_SOLAR_POSITIONS_WEIGHTED: List[Tuple[float, float, float]] = _make_solar_positions()
+    return [(a, z, w / total) for a, z, w in positions]
 
 
 # ---------------------------------------------------------------------------
-# Maximum shadow reach at the lowest sun angle we model (alt=3 deg, H=30m)
-# L = 30 / tan(3 deg) = 30 / 0.0524 = 572 m -> ~143 pixels at 4m
-# We cap at 100 pixels (400m) to keep GEE computation tractable.
-# Buildings casting shadows beyond 400m are rare (<5 storeys within urban density).
+# Class 1 – ShadowPenalty
 # ---------------------------------------------------------------------------
-MAX_SHADOW_PIXELS = 100  # kernel radius in pixels at 4m resolution
 
-
-def _shadow_mask_for_solar_position(
-    building_height: ee.Image,
-    solar_altitude_deg: float,
-    solar_azimuth_deg: float,
-    pixel_size_m: float = 4.0,
-) -> ee.Image:
+class ShadowPenalty:
     """
-    Binary shadow mask (1 = in shadow, 0 = sunlit) for one solar position.
+    Insolation-weighted 2.5D shadow model from Open Buildings height raster.
 
-    Uses actual building heights from the 2.5D Open Buildings dataset.
-    Each building casts a shadow proportional to its own height:
-      shadow_length_px = height_m / (tan(altitude) * pixel_size_m)
+    For each solar position (alt, az) the geometric shadow length of a building of
+    height H is:
+      L = H / tan(alt)  [metres]  ->  L_px = L / pixel_size_m  [pixels]
 
-    Algorithm:
-      1. shadow_length_image = height / tan(alt) / pixel_size  [pixels]
-         -- this is the number of pixels each building's shadow extends.
-      2. Rotate shadow_length_image into the shadow direction using translate.
-         We use a multi-step approach: translate by the shadow direction unit vector
-         scaled by max shadow reach, then compare translated height to local height.
+    Shadow propagation (GEE-efficient approximation):
+      1. shadow_length_px = building_height / (tan_alt * pixel_size_m)
+      2. Translate shadow_length_px by MAX_SHADOW_PIXELS in the shadow direction.
+      3. focal_max with same radius captures any caster in range.
+      4. Pixel P is in shadow if dilated_len >= 1 AND caster height > P height
+         (the second condition prevents self-shadowing).
 
-    Correct multi-step translate:
-      For each candidate shadow offset d (1..MAX_SHADOW_PIXELS):
-        shift height image by d pixels in shadow direction
-        shadow_at_d = shifted_height >= d * pixel_size * tan(alt)
-        (i.e. does the building at distance d still cast shadow here?)
-      Union all d -> final shadow mask.
+    Solar positions are insolation-weighted (weight = sin(altitude)) so low-sun
+    morning/winter positions, which cast long but energetically small shadows,
+    contribute proportionally less to the annual penalty.
 
-    GEE-efficient approximation of the above (avoids MAX_SHADOW_PIXELS GEE ops):
-      Use focal_max to propagate the shadow_length image outward by MAX_SHADOW_PIXELS.
-      After dilation, pixel P has the maximum shadow-length value within the kernel.
-      P is in shadow if that max shadow-length >= distance from P to the casting building.
-
-    Since we cannot efficiently compute exact distance-to-nearest-caster in GEE,
-    we use the simpler: P is in shadow if dilated_shadow_length_px >= 1.
-    This is conservative (slightly overestimates) but physically motivated.
-    The directional component is added via the rotate step.
+    Known approximations (targets for ML calibration):
+      - focal_max kernel is circular, not directional -> ~5-10 % overestimate of
+        shadow area.
+      - Diffuse irradiance (~30-45 % of GHI in urban India) is NOT blocked by
+        building shadows for rooftop pixels (Sky View Factor ~0.85-0.95).
+        This is now corrected in net_irradiance_image() via beam_fraction from
+        ERA5 HOURLY direct radiation, which removes the dominant ~30-40 % share
+        of shadow loss that was being incorrectly applied to diffuse irradiance.
+      - Rooftop SVF is assumed ~1.0 (diffuse fully received). In canyons between
+        buildings SVF could be 0.2-0.4, but roof_candidate pixels are by
+        definition at the top of buildings with open sky above.
     """
-    alt_rad = math.radians(max(solar_altitude_deg, 2.0))
-    tan_alt = math.tan(alt_rad)
 
-    # Shadow length in pixels for each building's own height
-    # shadow_length_px = height_m / (tan_alt * pixel_size_m)
-    shadow_length_px = building_height.divide(tan_alt * pixel_size_m)
+    MAX_SHADOW_PIXELS: int = 100  # 100 px * 4 m/px = 400 m maximum shadow reach
 
-    # Shadow direction: opposite to sun azimuth
-    shadow_az_rad = math.radians(solar_azimuth_deg + 180.0)
-    # Unit vector in shadow direction (pixels)
-    udx = math.sin(shadow_az_rad)
-    udy = math.cos(shadow_az_rad)
+    # Default positions (Delhi 28.6 N); overridden by dynamic solar_geometry module
+    _DELHI_POSITIONS: List[Tuple[float, float, float]] = _make_solar_positions()
 
-    # Translate the shadow_length image in the shadow direction by MAX_SHADOW_PIXELS.
-    # After translation, pixel P holds the shadow_length of the building that is
-    # exactly MAX_SHADOW_PIXELS away in the shadow direction.
-    # If that building's shadow_length >= MAX_SHADOW_PIXELS, its shadow reaches P.
-    # For intermediate distances, we use a focal_max to capture any building within range.
-    dx_translate = udx * MAX_SHADOW_PIXELS
-    dy_translate = udy * MAX_SHADOW_PIXELS
+    @staticmethod
+    def _mask_for_position(
+        building_height: ee.Image,
+        alt_deg: float,
+        az_deg: float,
+        pixel_size_m: float = 4.0,
+    ) -> ee.Image:
+        """Binary shadow mask (1=shadow, 0=sunlit) for one solar geometry."""
+        alt_rad = math.radians(max(alt_deg, 2.0))
+        tan_alt = math.tan(alt_rad)
 
-    # Step 1: translate shadow_length to the shadow direction
-    translated_shadow_len = shadow_length_px.translate(dx_translate, dy_translate)
+        shadow_len_px = building_height.divide(tan_alt * pixel_size_m)
 
-    # Step 2: dilate (focal_max) to capture any caster within the kernel
-    # kernel radius = MAX_SHADOW_PIXELS pixels
-    kernel = ee.Kernel.circle(radius=MAX_SHADOW_PIXELS, units="pixels", normalize=False)
-    dilated = translated_shadow_len.focal_max(kernel=kernel)
+        # Unit vector pointing in the shadow direction (opposite to sun azimuth)
+        shadow_az_rad = math.radians(az_deg + 180.0)
+        dx = math.sin(shadow_az_rad) * ShadowPenalty.MAX_SHADOW_PIXELS
+        dy = math.cos(shadow_az_rad) * ShadowPenalty.MAX_SHADOW_PIXELS
 
-    # Step 3: P is in shadow if dilated shadow length >= 1 pixel
-    # (i.e. at least one nearby building casts a shadow that reaches here)
-    # AND the casting neighbour is taller than P (no self-shadow)
-    caster_height = building_height.translate(dx_translate, dy_translate)
-    in_shadow = (
-        dilated.gte(1.0)
-        .And(caster_height.gt(building_height))
-    )
-    return in_shadow.rename("in_shadow").toUint8()
+        translated = shadow_len_px.translate(dx, dy)
+        kernel = ee.Kernel.circle(
+            radius=ShadowPenalty.MAX_SHADOW_PIXELS, units="pixels", normalize=False
+        )
+        dilated = translated.focal_max(kernel=kernel)
+        caster_h = building_height.translate(dx, dy)
 
+        return (
+            dilated.gte(1.0)
+            .And(caster_h.gt(building_height))
+            .rename("in_shadow")
+            .toUint8()
+        )
 
-def shadow_frequency_image(
-    building_height: ee.Image,
-    solar_positions: Optional[List[Tuple]] = None,
-    pixel_size_m: float = 4.0,
-    weighted: bool = True,
-) -> ee.Image:
-    """
-    Insolation-weighted shadow frequency across representative solar positions (0 to 1).
-
-    0 = never shadowed (fully sunlit across all weighted positions).
-    1 = always shadowed.
-
-    With weighted=True (default), each solar position is weighted by sin(altitude),
-    which is proportional to the direct irradiance at that sun angle. This ensures
-    that low-sun positions (which cast very long but energetically insignificant shadows)
-    contribute minimally to the annual shadow penalty.
-
-    Parameters
-    ----------
-    building_height : ee.Image
-        Band 'building_height' in metres (from Open Buildings 2.5D).
-    solar_positions : list, optional
-        List of (altitude_deg, azimuth_deg) or (altitude_deg, azimuth_deg, weight).
-        Defaults to DELHI_SOLAR_POSITIONS_WEIGHTED (18 positions, solstices+equinoxes).
-    pixel_size_m : float
-        Native pixel size (~4m for Open Buildings).
-    weighted : bool
-        If True, use insolation weights. If False, simple mean (legacy behaviour).
-    """
-    if solar_positions is None:
-        positions_with_weights = DELHI_SOLAR_POSITIONS_WEIGHTED
-    else:
-        # Accept both (alt, az) and (alt, az, weight) tuples
-        if len(solar_positions[0]) == 3:
-            positions_with_weights = solar_positions
+    @staticmethod
+    def frequency(
+        building_height: ee.Image,
+        solar_positions: Optional[List[Tuple]] = None,
+        pixel_size_m: float = 4.0,
+    ) -> ee.Image:
+        """
+        Insolation-weighted shadow frequency image [0, 1]. Band: shadow_frequency.
+        0 = never in shadow; 1 = always in shadow across all weighted positions.
+        """
+        if solar_positions is None:
+            pwt = ShadowPenalty._DELHI_POSITIONS
+        elif len(solar_positions[0]) == 3:
+            pwt = solar_positions
         else:
-            # Unweighted: uniform weights
             n = len(solar_positions)
-            positions_with_weights = [(alt, az, 1.0 / n) for alt, az in solar_positions]
+            pwt = [(a, z, 1.0 / n) for a, z in solar_positions]
 
-    shadow_images = []
-    for entry in positions_with_weights:
-        alt, az, w = entry
-        mask = _shadow_mask_for_solar_position(building_height, alt, az, pixel_size_m).toFloat()
-        shadow_images.append(mask.multiply(w))
+        imgs = [
+            ShadowPenalty._mask_for_position(building_height, a, z, pixel_size_m)
+            .toFloat()
+            .multiply(w)
+            for a, z, w in pwt
+        ]
+        result = imgs[0]
+        for img in imgs[1:]:
+            result = result.add(img)
+        return result.rename("shadow_frequency")
 
-    # Weighted sum of shadow masks (weights already normalised to sum=1)
-    result = shadow_images[0]
-    for img in shadow_images[1:]:
-        result = result.add(img)
+    @staticmethod
+    def retention(
+        building_height: ee.Image,
+        solar_positions: Optional[List[Tuple]] = None,
+        pixel_size_m: float = 4.0,
+    ) -> ee.Image:
+        """
+        Irradiance retention after shadow penalty [0, 1]. Band: shadow_retention.
+        retention = 1 - shadow_frequency.
+        """
+        return (
+            ee.Image(1.0)
+            .subtract(ShadowPenalty.frequency(building_height, solar_positions, pixel_size_m))
+            .rename("shadow_retention")
+        )
 
-    return result.rename("shadow_frequency")
+    @staticmethod
+    def stats(
+        aoi: ee.Geometry,
+        building_height: ee.Image,
+        solar_positions: Optional[List[Tuple]] = None,
+        scale_m: float = 4.0,
+    ) -> Dict[str, Any]:
+        """Aggregate mean shadow stats over AOI. Calls getInfo; returns plain dict."""
+        ret_img = ShadowPenalty.retention(building_height, solar_positions, scale_m)
+        mean_ret = _reduce_mean(ret_img, "shadow_retention", aoi, scale_m)
+        positions = solar_positions or ShadowPenalty._DELHI_POSITIONS
+        return {
+            "mean_shadow_retention": mean_ret,
+            "mean_shadow_frequency": round(1.0 - mean_ret, 4) if mean_ret is not None else None,
+            "n_solar_positions": len(positions),
+            "reduce_scale_m": scale_m,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Class 2 – UHIPenalty
+# ---------------------------------------------------------------------------
+
+class UHIPenalty:
+    """
+    Temperature-coefficient derate caused by the Urban Heat Island effect.
+
+    Physics:
+      PV output decreases linearly above 25 degC (STC):
+        dP/P = gamma * (T_cell - 25)
+      where gamma ~ -0.004 /degC for crystalline Si (IEC 60891; De Soto 2006).
+
+      Cell temperature:
+        T_cell = T_ambient + (NOCT - 20) / 800 * G
+      where NOCT ~ 45 degC, G is irradiance in W/m^2.
+
+      The UHI contribution to T_ambient:
+        delta_T_UHI = T_ambient_urban - T_ambient_rural_ref
+
+      Simplified UHI-only derate (urban excess above background only):
+        uhi_derate = 1 + gamma * delta_T_UHI
+
+      Typical Indian city UHI: 2-6 degC (Mohan et al. 2011).
+      At gamma = -0.004:
+        delta_T = 2 degC -> derate = 0.992  (~0.8 % loss)
+        delta_T = 4 degC -> derate = 0.984  (~1.6 % loss)
+        delta_T = 6 degC -> derate = 0.976  (~2.4 % loss)
+
+    UHI estimation (MODIS LST):
+      1. Annual median of MODIS MOD11A2 daytime LST (1 km) over the AOI.
+         Raw integer values * 0.02 = Kelvin; subtract 273.15 for degC.
+      2. Compute 20 km focal_mean of the LST image as the regional background.
+         (20 px at 1 km/px ~ 20 km; enough to span urban-rural gradient in
+          most Indian cities; larger cities like Delhi/Mumbai may need 25-30 km.)
+      3. delta_T_UHI = AOI mean LST - background mean at AOI location.
+
+    Note: UHI is a quasi-static location property; we use the full calendar year
+    of the accounting period for a robust seasonal composite.
+    """
+
+    MODIS_COLLECTION = "MODIS/061/MOD11A2"
+    LST_DAY_BAND = "LST_Day_1km"
+    LST_SCALE = 0.02          # raw integer * 0.02 = Kelvin (MODIS scale factor)
+    K_TO_C_OFFSET = 273.15
+    BACKGROUND_KERNEL_PX = 20  # 20 km at 1 km/pixel
+    DEFAULT_TEMP_COEFF = -0.004  # /degC, crystalline silicon (IEC 60891)
+
+    @classmethod
+    def _lst_celsius(cls, aoi: ee.Geometry, year: int) -> ee.Image:
+        """Annual median daytime LST in degC for the given calendar year."""
+        return (
+            ee.ImageCollection(cls.MODIS_COLLECTION)
+            .filterBounds(aoi)
+            .filterDate(f"{year}-01-01", f"{year + 1}-01-01")
+            .select(cls.LST_DAY_BAND)
+            .median()
+            .multiply(cls.LST_SCALE)
+            .subtract(cls.K_TO_C_OFFSET)
+            .rename("LST_celsius")
+        )
+
+    @classmethod
+    def stats(
+        cls,
+        aoi: ee.Geometry,
+        start_date: str,
+        temp_coeff: float = DEFAULT_TEMP_COEFF,
+        scale_m: float = 1000.0,
+    ) -> Dict[str, Any]:
+        """
+        Compute UHI intensity and derate factor for the AOI.
+
+        Parameters
+        ----------
+        aoi        : GEE geometry of the area under study.
+        start_date : ISO date string; year is extracted for annual LST composite.
+        temp_coeff : PV temperature coefficient /degC (default -0.004 for c-Si).
+        scale_m    : reduceRegion scale; should match MODIS native ~1000 m.
+
+        Returns dict keys:
+          delta_t_uhi_celsius    -- UHI intensity above 20 km background (degC)
+          mean_lst_day_celsius   -- mean daytime LST over AOI (degC)
+          background_lst_celsius -- 20 km smoothed regional background (degC)
+          uhi_derate_factor      -- scalar multiplier: 1 + gamma * delta_T
+          temp_coeff_per_c       -- gamma value used
+          source                 -- "reduceRegion" | "fallback_zero"
+        """
+        year = int(start_date[:4])
+        lst = cls._lst_celsius(aoi, year)
+
+        # 20 km focal mean as rural/background reference
+        background = lst.focal_mean(
+            radius=cls.BACKGROUND_KERNEL_PX,
+            kernelType="circle",
+            units="pixels",
+        )
+        uhi_anomaly = lst.subtract(background).rename("uhi_anomaly")
+
+        # Single reduceRegion call for both bands
+        combined = lst.addBands(uhi_anomaly)
+        raw = combined.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=aoi,
+            scale=scale_m,
+            maxPixels=1e9,
+            bestEffort=True,
+        ).getInfo() or {}
+
+        urban_lst = raw.get("LST_celsius")
+        delta_t = raw.get("uhi_anomaly")
+        source = "reduceRegion"
+
+        if delta_t is None:
+            delta_t = 0.0
+            source = "fallback_zero"
+        if urban_lst is None:
+            urban_lst = 35.0  # representative Indian urban daytime T (degC)
+
+        delta_t = float(delta_t)
+        urban_lst = float(urban_lst)
+        background_lst = urban_lst - delta_t
+        derate = 1.0 + temp_coeff * delta_t
+
+        return {
+            "delta_t_uhi_celsius": round(delta_t, 3),
+            "mean_lst_day_celsius": round(urban_lst, 2),
+            "background_lst_celsius": round(background_lst, 2),
+            "uhi_derate_factor": round(derate, 5),
+            "temp_coeff_per_c": temp_coeff,
+            "source": source,
+            "modis_collection": cls.MODIS_COLLECTION,
+            "background_kernel_km": cls.BACKGROUND_KERNEL_PX,
+            "accounting_year": year,
+            "scale_m": scale_m,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Class 3 – SoilingPenalty
+# ---------------------------------------------------------------------------
+
+class SoilingPenalty:
+    """
+    Dust/soiling derate from MODIS MAIAC Aerosol Optical Depth (AOD) at 550 nm.
+
+    Physics:
+      Atmospheric aerosols (mineral dust, soot, secondary sulphate/nitrate)
+      settle on the PV cover glass, reducing its transmittance.
+      Dry deposition rate is proportional to the ambient aerosol column loading:
+
+        soiling_loss_annual = mean_AOD_550nm * SOILING_COEFFICIENT
+
+      SOILING_COEFFICIENT ~ 0.08 /AOD_unit/year  (Kimber et al. 2006;
+      Sayyah et al. 2014; validated for South Asian aerosol types in
+      Mani & Pillai 2010).
+
+      No output clamp is applied. The AOD-driven loss is reported as computed:
+        AOD = 0.15 (clean rural)   -> loss = 1.2 %
+        AOD = 0.50 (typical urban) -> loss = 4.0 %
+        AOD = 1.00 (Delhi winter)  -> loss = 8.0 %
+        AOD = 1.50 (severe event)  -> loss = 12.0 %
+
+    Why AOD instead of DBSI:
+      DBSI (Sentinel-2 spectral index) measures bare soil exposure -- a dust
+      SOURCE proxy two steps removed from actual panel soiling. The conversion
+      from DBSI to loss % requires an arbitrary normalisation range that forces
+      the output to match assumed literature values.
+
+      MODIS MAIAC AOD directly measures the atmospheric aerosol column loading
+      that causes soiling via dry deposition. The physics chain is:
+        AOD -> aerosol surface concentration -> deposition flux -> loss
+      The single coefficient (SOILING_COEFFICIENT) is physically motivated and
+      its units correspond directly to a measurable deposition process.
+
+      Urban India has AOD 3-5x higher than surrounding rural areas, making this
+      a genuinely urban-specific penalty consistent with the project problem statement.
+
+    Data source:
+      MODIS MAIAC MCD19A2 v061 (Lyapustin et al. 2011), 1 km daily.
+      MAIAC is specifically designed for urban and bright-surface retrievals where
+      the standard MODIS dark-target algorithm fails.
+      Annual mean of valid daily retrievals (cloudy days excluded automatically
+      by MODIS QA masking in GEE).
+    """
+
+    MAIAC_COLLECTION = "MODIS/061/MCD19A2_GRANULES"
+    AOD_BAND = "Optical_Depth_055"   # 550 nm standard reference; scale factor 0.001
+    AOD_SCALE = 0.001
+    SOILING_COEFFICIENT = 0.08       # fractional loss per unit mean AOD per year
+                                     # (Kimber et al. 2006; Sayyah et al. 2014)
+
+    @classmethod
+    def aod_image(cls, aoi: ee.Geometry, year: int) -> ee.Image:
+        """Annual mean AOD at 550 nm for the given calendar year. Band: AOD_550nm."""
+        return (
+            ee.ImageCollection(cls.MAIAC_COLLECTION)
+            .filterBounds(aoi)
+            .filterDate(f"{year}-01-01", f"{year + 1}-01-01")
+            .select(cls.AOD_BAND)
+            .mean()
+            .multiply(cls.AOD_SCALE)
+            .rename("AOD_550nm")
+        )
+
+    @classmethod
+    def stats(
+        cls,
+        aoi: ee.Geometry,
+        start_date: str,
+        soiling_coefficient: float = SOILING_COEFFICIENT,
+        scale_m: float = 1000.0,
+    ) -> Dict[str, Any]:
+        """
+        Compute soiling retention factor from MODIS MAIAC AOD.
+
+        Parameters
+        ----------
+        aoi                 : GEE geometry of the area under study.
+        start_date          : ISO date; year is extracted for the annual composite.
+        soiling_coefficient : Fractional loss per unit mean AOD per year (default 0.08).
+        scale_m             : reduceRegion scale; MAIAC native is ~1000 m.
+
+        Returns dict keys:
+          mean_aod_550nm          -- annual mean AOD at 550 nm over AOI
+          soiling_loss_fraction   -- mean_AOD * soiling_coefficient  (uncapped)
+          soiling_retention_factor-- 1 - loss
+          soiling_coefficient     -- coefficient used
+          source                  -- "reduceRegion" | "fallback_urban_midpoint"
+        """
+        year = int(start_date[:4])
+        aod_img = cls.aod_image(aoi, year)
+
+        mean_aod = _reduce_mean(aod_img, "AOD_550nm", aoi, scale_m)
+        source = "reduceRegion"
+
+        if mean_aod is None:
+            # No valid MAIAC retrievals for this AOI/year (very unlikely for India)
+            mean_aod = 0.50   # conservative urban India annual mean
+            source = "fallback_urban_midpoint"
+
+        mean_aod = float(mean_aod)
+        loss = mean_aod * soiling_coefficient
+        retention = 1.0 - loss
+
+        return {
+            "mean_aod_550nm": round(mean_aod, 4),
+            "soiling_loss_fraction": round(loss, 4),
+            "soiling_retention_factor": round(retention, 5),
+            "soiling_coefficient": soiling_coefficient,
+            "source": source,
+            "maiac_collection": cls.MAIAC_COLLECTION,
+            "accounting_year": year,
+            "scale_m": scale_m,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module-level shims: backward-compatible API for main.py and tests
+# ---------------------------------------------------------------------------
+
+DELHI_SOLAR_POSITIONS_WEIGHTED: List[Tuple[float, float, float]] = (
+    ShadowPenalty._DELHI_POSITIONS
+)
 
 
 def shadow_retention_fraction(
@@ -256,41 +507,51 @@ def shadow_retention_fraction(
     solar_positions: Optional[List[Tuple]] = None,
     pixel_size_m: float = 4.0,
 ) -> ee.Image:
-    """
-    Fraction of irradiance retained after shadow penalty (1 - shadow_frequency).
-
-    1.0 = fully sunlit, 0.0 = always shadowed.
-    Multiply baseline irradiance by this to get shadow-adjusted irradiance.
-    """
-    freq = shadow_frequency_image(building_height, solar_positions, pixel_size_m)
-    return ee.Image(1.0).subtract(freq).rename("shadow_retention")
+    """Retained irradiance fraction [0,1] after shadow penalty. Band: shadow_retention."""
+    return ShadowPenalty.retention(building_height, solar_positions, pixel_size_m)
 
 
 def net_irradiance_image(
     baseline_kwh_m2_period: float,
-    shadow_retention: ee.Image,
+    shadow_frequency: ee.Image,
+    beam_fraction: float = 1.0,
+    uhi_derate: float = 1.0,
+    soiling_retention: float = 1.0,
 ) -> ee.Image:
     """
-    Per-pixel net irradiance after shadow penalty for the selected time window.
+    Per-pixel net irradiance after all penalty layers with beam/diffuse correction.
+
+    Corrected formula (replaces naive GHI * shadow_retention):
+      net = GHI * (1 - shadow_frequency * beam_fraction) * uhi_derate * soiling_retention
+
+    Derivation:
+      GHI = DHI + DNI_h  (diffuse + direct horizontal)
+      Shadows block only DNI_h (beam); DHI reaches rooftops from open sky.
+        net = DHI + DNI_h * (1 - shadow_frequency)
+            = GHI * diffuse_fraction + GHI * beam_fraction * (1 - shadow_frequency)
+            = GHI * (1 - shadow_frequency * beam_fraction)
 
     Parameters
     ----------
     baseline_kwh_m2_period : float
-        Regional ERA5 GHI integrated over the accounting period (kWh/m^2): one year,
-        one quarter, or one day, matching shadow sampling for that same window.
-    shadow_retention : ee.Image
-        Band 'shadow_retention' [0, 1] from shadow_retention_fraction().
+        ERA5-Land GHI integrated over the accounting period (kWh/m^2).
+    shadow_frequency : ee.Image
+        Per-pixel insolation-weighted shadow frequency [0, 1]; band 'shadow_frequency'.
+        From ShadowPenalty.frequency().
+    beam_fraction : float
+        Fraction of GHI that is direct beam, computed from ERA5 HOURLY
+        total_sky_direct_solar_radiation_at_surface / surface_solar_radiation_downwards.
+        Default 1.0 preserves old behaviour if caller does not pass it.
+    uhi_derate : float
+        Scalar from UHIPenalty.stats()['uhi_derate_factor'].
+    soiling_retention : float
+        Scalar from SoilingPenalty.stats()['soiling_retention_factor'].
 
-    Returns
-    -------
-    ee.Image
-        Band 'net_irradiance_kwh_m2_period', spatially varying.
+    Returns ee.Image band 'net_irradiance_kwh_m2_period'.
     """
-    return (
-        shadow_retention
-        .multiply(baseline_kwh_m2_period)
-        .rename("net_irradiance_kwh_m2_period")
-    )
+    corrected_retention = ee.Image(1.0).subtract(shadow_frequency.multiply(beam_fraction))
+    effective_baseline = baseline_kwh_m2_period * uhi_derate * soiling_retention
+    return corrected_retention.multiply(effective_baseline).rename("net_irradiance_kwh_m2_period")
 
 
 def per_building_yield(
@@ -302,12 +563,7 @@ def per_building_yield(
     performance_ratio: float = 0.80,
     scale_m: float = 4.0,
 ) -> ee.FeatureCollection:
-    """
-    Annual PV yield per building footprint (kWh/year).
-
-    For each building polygon in buildings_fc:
-      yield = sum(net_irradiance * roof_mask * pixelArea) * efficiency * PR
-    """
+    """PV yield per building polygon (kWh/period). Adds period_yield_kwh to each feature."""
     energy_img = (
         net_irradiance
         .multiply(roof_mask.toFloat())
@@ -315,44 +571,31 @@ def per_building_yield(
         .rename("energy_kwh_pixel")
     )
 
-    def add_yield(feature: ee.Feature) -> ee.Feature:
-        geom = feature.geometry()
-        stats = energy_img.reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=geom,
-            scale=scale_m,
-            maxPixels=1e7,
-        )
-        total_energy_kwh = ee.Number(stats.get("energy_kwh_pixel")).multiply(
-            panel_efficiency * performance_ratio
-        )
+    def _add(feature: ee.Feature) -> ee.Feature:
+        g = feature.geometry()
+        total = ee.Number(
+            energy_img
+            .reduceRegion(ee.Reducer.sum(), g, scale_m, maxPixels=1e7)
+            .get("energy_kwh_pixel")
+        ).multiply(panel_efficiency * performance_ratio)
         roof_area = (
             roof_mask.toFloat()
             .multiply(ee.Image.pixelArea())
-            .reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=geom,
-                scale=scale_m,
-                maxPixels=1e7,
-            )
+            .reduceRegion(ee.Reducer.sum(), g, scale_m, maxPixels=1e7)
             .get("roof_candidate")
         )
         irr_mean = (
-            net_irradiance.reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=geom,
-                scale=scale_m,
-                maxPixels=1e7,
-            )
+            net_irradiance
+            .reduceRegion(ee.Reducer.mean(), g, scale_m, maxPixels=1e7)
             .get("net_irradiance_kwh_m2_period")
         )
         return feature.set({
             "roof_area_m2": roof_area,
             "net_irradiance_kwh_m2_period": irr_mean,
-            "period_yield_kwh": total_energy_kwh,
+            "period_yield_kwh": total,
         })
 
-    return buildings_fc.filterBounds(aoi).map(add_yield)
+    return buildings_fc.filterBounds(aoi).map(_add)
 
 
 def get_shadow_stats(
@@ -361,24 +604,5 @@ def get_shadow_stats(
     solar_positions: Optional[List[Tuple]] = None,
     scale_m: float = 4.0,
 ) -> Dict[str, Any]:
-    """
-    Aggregate shadow statistics over the AOI: mean shadow frequency and retention.
-    Returns a plain Python dict (calls getInfo).
-    """
-    retention = shadow_retention_fraction(building_height, solar_positions, scale_m)
-    raw = retention.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=aoi,
-        scale=scale_m,
-        maxPixels=1e9,
-        tileScale=4,
-    ).getInfo()
-    mean_retention = raw.get("shadow_retention") if raw else None
-    mean_shadow = (1.0 - mean_retention) if mean_retention is not None else None
-    return {
-        "mean_shadow_frequency": mean_shadow,
-        "mean_shadow_retention": mean_retention,
-        "n_solar_positions": len(DELHI_SOLAR_POSITIONS_WEIGHTED if solar_positions is None else solar_positions),
-        "reduce_scale_m": scale_m,
-        "reduce_region_raw": raw,
-    }
+    """Aggregate shadow stats dict (calls getInfo). Delegates to ShadowPenalty.stats."""
+    return ShadowPenalty.stats(aoi, building_height, solar_positions, scale_m)

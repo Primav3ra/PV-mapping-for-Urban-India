@@ -1,13 +1,23 @@
 """
-ERA5-Land hourly GHI baselines for the PV mapping pipeline.
+ERA5 irradiance baselines and beam/diffuse split for the PV mapping pipeline.
 
-Collection : ECMWF/ERA5_LAND/HOURLY
-Band       : surface_solar_radiation_downwards_hourly (J/m^2 per hour)
-Resolution : ~9 km (vs MERRA-2 ~50 km)
+GHI baseline
+  Collection : ECMWF/ERA5_LAND/HOURLY
+  Band       : surface_solar_radiation_downwards_hourly (J/m^2 per hour)
+  Resolution : ~9 km (0.1 deg native)
+  Unit conv  : J/m^2 / 3,600,000 = kWh/m^2
 
-Unit conversion: J/m^2 per hour / 3,600,000 = kWh/m^2 per hour.
-Sum all hourly steps over the accounting window -> kWh/m^2 for that window.
-Divide by number of years -> mean annual kWh/m^2/year (yearly mode).
+Beam fraction (direct/GHI split)
+  Collection : ECMWF/ERA5/HOURLY
+  Bands      : surface_solar_radiation_downwards        (GHI, J/m^2 accumulated)
+               total_sky_direct_solar_radiation_at_surface (direct HI, J/m^2)
+  Resolution : ~28 km (0.25 deg native)
+  Usage      : beam_fraction = sum(direct) / sum(GHI) over the period.
+               Used to correct shadow losses: only the beam component is
+               blocked by building shadows. Diffuse reaches shadowed rooftops
+               from the open sky hemisphere.
+               Typical urban India: beam_fraction 0.55-0.72 annually
+               (higher in dry season, lower during monsoon cloud cover).
 """
 from __future__ import annotations
 
@@ -20,6 +30,12 @@ ERA5_COLLECTION = "ECMWF/ERA5_LAND/HOURLY"
 ERA5_BAND = "surface_solar_radiation_downwards_hourly"  # J/m^2 per hour
 ERA5_SCALE_M = 11_132.0   # 0.1 deg at equator (~9 km native)
 _J_TO_KWH = 3_600_000.0
+
+# ERA5 HOURLY (not ERA5-Land) -- used for beam/diffuse split only
+_ERA5_HOURLY_COLLECTION = "ECMWF/ERA5/HOURLY"
+_ERA5_HOURLY_GHI_BAND    = "surface_solar_radiation_downwards"        # J/m^2 accumulated
+_ERA5_HOURLY_DIRECT_BAND = "total_sky_direct_solar_radiation_at_surface"  # J/m^2 accumulated
+_ERA5_HOURLY_SCALE_M     = 27_830.0  # 0.25 deg at equator (~28 km native)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +238,86 @@ def get_roof_masked_era5_baseline_for_date_range(
         "reduce_scale_m": scale_m, "roof_area_scale_m": roof_area_scale_m,
         "method": "two_scale_roof_area_x_era5_range_annualized",
         "irradiance_source": range_info["value_source"],
+    }
+
+
+def sample_era5_beam_fraction_at_point(
+    point: ee.Geometry,
+    start_date: str,
+    end_date_exclusive: str,
+    scale_m: float = _ERA5_HOURLY_SCALE_M,
+) -> Dict[str, Any]:
+    """
+    Period-mean beam fraction (direct / GHI) from ERA5 HOURLY at a point.
+
+    Both numerator (direct horizontal) and denominator (GHI) come from the
+    same ERA5 HOURLY collection so the ratio is internally consistent.
+    ERA5-Land is NOT used here -- it lacks the direct radiation band.
+
+    Formula
+    -------
+    beam_fraction = sum(total_sky_direct_solar_radiation_at_surface)
+                  / sum(surface_solar_radiation_downwards)
+    over [start_date, end_date_exclusive).
+
+    This scalar is used to correct the shadow penalty:
+      net_irr = GHI * (1 - shadow_frequency * beam_fraction)
+    instead of the naive GHI * (1 - shadow_frequency) which assumed that
+    100% of GHI is direct and fully blocked by building shadows.
+
+    Fallback
+    --------
+    If sampling fails (no ERA5 coverage -- very unlikely for India):
+    returns beam_fraction = 0.60, the conservative annual mean for
+    cloudy urban India (fraction is lower during monsoon ~0.45,
+    higher in dry winter ~0.75; 0.60 is a reasonable annual midpoint).
+
+    Returns dict keys
+    -----------------
+    beam_fraction          -- direct / GHI  [0, 1]
+    diffuse_fraction       -- 1 - beam_fraction
+    direct_j_m2_period     -- sum of direct radiation J/m^2
+    ghi_j_m2_period        -- sum of GHI J/m^2
+    source                 -- "era5_hourly" | "fallback_*"
+    """
+    col = ee.ImageCollection(_ERA5_HOURLY_COLLECTION).filterDate(start_date, end_date_exclusive)
+    ghi_img    = col.select(_ERA5_HOURLY_GHI_BAND).sum().rename("ghi_sum")
+    direct_img = col.select(_ERA5_HOURLY_DIRECT_BAND).sum().rename("direct_sum")
+    combined   = ghi_img.addBands(direct_img)
+
+    fc = combined.sample(region=point, scale=scale_m, numPixels=1, geometries=False)
+    if fc.size().getInfo() == 0:
+        return {
+            "beam_fraction": 0.60, "diffuse_fraction": 0.40,
+            "direct_j_m2_period": None, "ghi_j_m2_period": None,
+            "source": "fallback_no_sample",
+            "collection": _ERA5_HOURLY_COLLECTION,
+            "start_date": start_date, "end_date_exclusive": end_date_exclusive,
+        }
+
+    props = (fc.first().getInfo() or {}).get("properties", {})
+    ghi_raw    = props.get("ghi_sum")
+    direct_raw = props.get("direct_sum")
+
+    if ghi_raw is None or direct_raw is None or float(ghi_raw) <= 0:
+        return {
+            "beam_fraction": 0.60, "diffuse_fraction": 0.40,
+            "direct_j_m2_period": direct_raw, "ghi_j_m2_period": ghi_raw,
+            "source": "fallback_null_band",
+            "collection": _ERA5_HOURLY_COLLECTION,
+            "start_date": start_date, "end_date_exclusive": end_date_exclusive,
+        }
+
+    beam = min(float(direct_raw) / float(ghi_raw), 1.0)
+    return {
+        "beam_fraction": round(beam, 4),
+        "diffuse_fraction": round(1.0 - beam, 4),
+        "direct_j_m2_period": round(float(direct_raw), 1),
+        "ghi_j_m2_period": round(float(ghi_raw), 1),
+        "source": "era5_hourly",
+        "collection": _ERA5_HOURLY_COLLECTION,
+        "start_date": start_date, "end_date_exclusive": end_date_exclusive,
+        "scale_m": scale_m,
     }
 
 
