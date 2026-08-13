@@ -1,6 +1,9 @@
-# Rooftop Solar Mapping for Urban India
+# SOLARIS - Rooftop Solar Mapping for Urban Cities
 
-Geospatial pipeline + web app for estimating **rooftop solar PV yield** for urban India using **Google Earth Engine (GEE)** datasets, served via a **FastAPI** backend and an interactive **Leaflet** map UI.
+<img width="1917" height="928" alt="image" src="https://github.com/user-attachments/assets/7af6d917-0f41-4aed-8d67-d28a4ff892be" />
+
+
+Geospatial pipeline + web app for estimating **rooftop solar PV yield** for urban planning using **Google Earth Engine (GEE)** datasets, served via a **FastAPI** backend and an interactive **Leaflet** map UI.
 
 ## What it does
 
