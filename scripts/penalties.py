@@ -106,34 +106,22 @@ def _make_solar_positions() -> List[Tuple[float, float, float]]:
 
 class ShadowPenalty:
     """
-    Insolation-weighted 2.5D shadow model from Open Buildings height raster.
+    2.5D shadow model off the Open Buildings height raster, weighted by how much sun
+    each position actually delivers.
 
-    For each solar position (alt, az) the geometric shadow length of a building of
-    height H is:
-      L = H / tan(alt)  [metres]  ->  L_px = L / pixel_size_m  [pixels]
+    Per sun position (alt, az) a building of height H throws a shadow H / tan(alt) metres
+    long. Doing that exactly per pixel is too slow in EE, so it's approximated: project
+    the shadow-length image along the shadow direction, focal_max over the same radius to
+    catch any caster in range, and flag a pixel as shadowed when a taller neighbour reaches
+    it (the height check is what stops a building shadowing itself).
 
-    Shadow propagation (GEE-efficient approximation):
-      1. shadow_length_px = building_height / (tan_alt * pixel_size_m)
-      2. Translate shadow_length_px by MAX_SHADOW_PIXELS in the shadow direction.
-      3. focal_max with same radius captures any caster in range.
-      4. Pixel P is in shadow if dilated_len >= 1 AND caster height > P height
-         (the second condition prevents self-shadowing).
+    Positions are weighted by sin(altitude), so low winter/morning sun -- long shadows but
+    little energy -- doesn't dominate the yearly figure.
 
-    Solar positions are insolation-weighted (weight = sin(altitude)) so low-sun
-    morning/winter positions, which cast long but energetically small shadows,
-    contribute proportionally less to the annual penalty.
-
-    Known approximations (targets for ML calibration):
-      - focal_max kernel is circular, not directional -> ~5-10 % overestimate of
-        shadow area.
-      - Diffuse irradiance (~30-45 % of GHI in urban India) is NOT blocked by
-        building shadows for rooftop pixels (Sky View Factor ~0.85-0.95).
-        This is now corrected in net_irradiance_image() via beam_fraction from
-        ERA5 HOURLY direct radiation, which removes the dominant ~30-40 % share
-        of shadow loss that was being incorrectly applied to diffuse irradiance.
-      - Rooftop SVF is assumed ~1.0 (diffuse fully received). In canyons between
-        buildings SVF could be 0.2-0.4, but roof_candidate pixels are by
-        definition at the top of buildings with open sky above.
+    Rough edges: the focal_max kernel is a circle rather than directional, so shadow area
+    runs maybe 5-10% high; and shadows only take out the direct beam -- diffuse is dealt
+    with elsewhere (beam_fraction in net_irradiance_image + the SkyViewFactor layer), not
+    here.
     """
 
     MAX_SHADOW_PIXELS: int = 100  # 100 px * 4 m/px = 400 m maximum shadow reach
@@ -212,39 +200,24 @@ class ShadowPenalty:
 
 class SkyViewFactor:
     """
-    Planar (cosine-weighted) Sky View Factor from the 2.5D building-height raster.
+    The diffuse-light sibling of ShadowPenalty. Shadows block the direct beam; tall
+    neighbours also hide part of the sky dome, so a roof doesn't collect the full
+    diffuse either. SVF = the fraction of sky the roof can still see.
 
-    Where ShadowPenalty removes the DIRECT beam blocked by buildings, this layer
-    removes the DIFFUSE light blocked by buildings: surrounding structures occlude
-    part of the sky hemisphere, so a rooftop receives less than the full diffuse
-    irradiance that an open horizontal surface would.
+        SVF = 1 - avg over 8 compass directions of sin^2(horizon angle)
 
-    For a horizontal rooftop pixel, the fraction of isotropic diffuse sky radiation
-    that is still received:
+    where the horizon angle in a direction is the steepest obstruction we hit stepping
+    outward. The sin^2 weighting is the usual flat-surface diffuse form (Oke). Net
+    retention then reads: diffuse_fraction * SVF + beam_fraction * (1 - shadow_freq).
 
-        SVF = 1 - mean_over_azimuth( sin^2( horizon_elevation_angle ) )
-
-        horizon_elevation_angle(azimuth) = max over distance d of
-            atan( (H_neighbour(d) - H_self) / d )      [>= 0; only taller neighbours block]
-
-    The sin^2 weighting is the standard planar-surface isotropic-diffuse form (Oke,
-    *Boundary Layer Climates*): an obstruction rising to elevation beta in an azimuth
-    sector blocks a fraction sin^2(beta) of the diffuse flux a horizontal surface
-    would otherwise receive from that sector. Integrating over azimuth and normalising
-    gives 1 - mean(sin^2(beta)).
-
-    Rooftop pixels sit at (or near) the top of their own building, so self-height is
-    subtracted and SVF is typically high (~0.85-1.0); only genuinely TALLER neighbours
-    reduce it. Deep street canyons would be much lower, but roof-candidate pixels are
-    by definition above the canyon.
-
-    Combined with the beam/shadow term the net retention becomes:
-        retention = diffuse_fraction * SVF + beam_fraction * (1 - shadow_frequency)
+    Since we subtract self-height, only genuinely TALLER neighbours count, so roof SVF
+    usually lands ~0.85-1.0. Street canyons would be far lower, but roof pixels aren't
+    down in the canyon.
     """
 
     N_AZIMUTH: int = 8
-    # Sample radii in pixels; * pixel_size_m = metres. Log-spaced: near obstructions
-    # dominate the horizon angle, distant ones subtend a small angle and matter less.
+    # how far out to look, in pixels (x4m). Roughly log-spaced -- the near buildings set
+    # the horizon; anything far away barely subtends an angle.
     DIST_PX: Tuple[int, ...] = (1, 2, 4, 8, 16)
 
     @staticmethod
@@ -263,13 +236,13 @@ class SkyViewFactor:
             az = 2.0 * math.pi * k / n_az
             ux, uy = math.sin(az), math.cos(az)
 
-            # Horizon elevation angle in this azimuth = max over sampled distances.
+            # walk outward in this direction, keep the steepest obstruction
             angle_imgs: List[ee.Image] = []
             for d in dists:
                 dm = float(d) * pixel_size_m
                 neighbour = building_height.translate(ux * d, uy * d)
-                rise = neighbour.subtract(building_height).max(0.0)   # taller neighbours only
-                angle_imgs.append(rise.divide(dm).atan())             # radians, >= 0
+                rise = neighbour.subtract(building_height).max(0.0)   # ignore anything shorter than us
+                angle_imgs.append(rise.divide(dm).atan())
             horizon = angle_imgs[0]
             for a in angle_imgs[1:]:
                 horizon = horizon.max(a)
@@ -290,41 +263,20 @@ class SkyViewFactor:
 
 class UHIPenalty:
     """
-    Temperature-coefficient derate caused by the Urban Heat Island effect.
+    Efficiency hit from the city running hotter than its surroundings (urban heat island).
 
-    Physics:
-      PV output decreases linearly above 25 degC (STC):
-        dP/P = gamma * (T_cell - 25)
-      where gamma ~ -0.004 /degC for crystalline Si (IEC 60891; De Soto 2006).
+    Panels lose output above 25 degC (STC): dP/P = gamma * (T_cell - 25), with
+    gamma ~ -0.004 /degC for crystalline silicon (IEC 60891; De Soto 2006). Cell temp is
+    the usual NOCT form, T_cell = T_ambient + (NOCT-20)/800 * G. We only charge for the
+    *urban excess* here -- delta_T = urban - rural background -- so uhi_derate =
+    1 + gamma*delta_T. For an Indian city that's small: 2-6 degC of UHI (Mohan et al. 2011)
+    works out to roughly 0.8-2.4% off.
 
-      Cell temperature:
-        T_cell = T_ambient + (NOCT - 20) / 800 * G
-      where NOCT ~ 45 degC, G is irradiance in W/m^2.
-
-      The UHI contribution to T_ambient:
-        delta_T_UHI = T_ambient_urban - T_ambient_rural_ref
-
-      Simplified UHI-only derate (urban excess above background only):
-        uhi_derate = 1 + gamma * delta_T_UHI
-
-      Typical Indian city UHI: 2-6 degC (Mohan et al. 2011).
-      At gamma = -0.004:
-        delta_T = 2 degC -> derate = 0.992  (~0.8 % loss)
-        delta_T = 4 degC -> derate = 0.984  (~1.6 % loss)
-        delta_T = 6 degC -> derate = 0.976  (~2.4 % loss)
-
-    UHI estimation (MODIS LST):
-      1. Annual median of MODIS MOD11A2 daytime LST (1 km) over the AOI.
-         Raw integer values * 0.02 = Kelvin; subtract 273.15 for degC.
-      2. Compute 30 km focal_mean of the LST image as the regional background.
-         (30 px at 1 km/px ~ 30 km; sized to reach beyond the built-up core of
-          large polynuclear cities like Delhi/Mumbai, where a smaller kernel
-          stays entirely inside the urban heat footprint and drives the
-          urban-minus-background anomaly artificially toward zero.)
-      3. delta_T_UHI = AOI mean LST - background mean at AOI location.
-
-    Note: UHI is a quasi-static location property; we use the full calendar year
-    of the accounting period for a robust seasonal composite.
+    Getting delta_T from MODIS: take the annual median daytime LST (MOD11A2, 1 km; raw*0.02
+    = Kelvin, then -273.15), subtract a 30 km focal-mean "background". The 30 km is
+    deliberate -- for a sprawling city like Delhi a tighter window sits entirely inside the
+    heat island and the anomaly collapses to ~0. A full year of data keeps the composite
+    stable across seasons.
     """
 
     MODIS_COLLECTION = "MODIS/061/MOD11A2"
@@ -357,22 +309,10 @@ class UHIPenalty:
         scale_m: float = 1000.0,
     ) -> Dict[str, Any]:
         """
-        Compute UHI intensity and derate factor for the AOI.
-
-        Parameters
-        ----------
-        aoi        : GEE geometry of the area under study.
-        start_date : ISO date string; year is extracted for annual LST composite.
-        temp_coeff : PV temperature coefficient /degC (default -0.004 for c-Si).
-        scale_m    : reduceRegion scale; should match MODIS native ~1000 m.
-
-        Returns dict keys:
-          delta_t_uhi_celsius    -- UHI intensity above 20 km background (degC)
-          mean_lst_day_celsius   -- mean daytime LST over AOI (degC)
-          background_lst_celsius -- 20 km smoothed regional background (degC)
-          uhi_derate_factor      -- scalar multiplier: 1 + gamma * delta_T
-          temp_coeff_per_c       -- gamma value used
-          source                 -- "reduceRegion" | "fallback_zero"
+        UHI intensity + derate for the AOI. start_date just supplies the year for the
+        annual LST composite; scale_m should sit near MODIS' native 1 km. Returns a dict
+        with delta_t_uhi_celsius, the mean/background LSTs, the uhi_derate_factor
+        (1 + gamma*delta_T), the gamma used, and a source tag.
         """
         year = int(start_date[:4])
         lst = cls._lst_celsius(aoi, year)
@@ -430,46 +370,23 @@ class UHIPenalty:
 
 class SoilingPenalty:
     """
-    Dust/soiling derate from MODIS MAIAC Aerosol Optical Depth (AOD) at 550 nm.
+    Dust/soiling derate driven by MODIS MAIAC aerosol optical depth (AOD, 550 nm).
 
-    Physics:
-      Atmospheric aerosols (mineral dust, soot, secondary sulphate/nitrate)
-      settle on the PV cover glass, reducing its transmittance.
-      Dry deposition rate is proportional to the ambient aerosol column loading:
+    The idea: airborne aerosols (dust, soot, sulphate/nitrate) settle on the cover glass
+    and cut its transmittance, and how fast they deposit tracks the aerosol column above.
+    So we take annual loss = mean AOD * 0.08 per AOD unit (Kimber et al. 2006; Sayyah
+    et al. 2014; Mani & Pillai 2010 for South Asian dust). No clamp -- the loss just
+    follows the AOD, e.g. ~4% at a typical urban 0.5, ~8% at a Delhi-winter 1.0.
 
-        soiling_loss_annual = mean_AOD_550nm * SOILING_COEFFICIENT
+    Why AOD and not a bare-soil index like DBSI: DBSI measures the dust *source*, two steps
+    removed from what lands on a panel, and turning it into a loss % needs an arbitrary
+    fudge range. AOD is the actual atmospheric loading that drives dry deposition, and the
+    0.08 coefficient maps to a real physical process. It's also genuinely urban -- city AOD
+    runs 3-5x its rural surroundings, which is the whole point of the project.
 
-      SOILING_COEFFICIENT ~ 0.08 /AOD_unit/year  (Kimber et al. 2006;
-      Sayyah et al. 2014; validated for South Asian aerosol types in
-      Mani & Pillai 2010).
-
-      No output clamp is applied. The AOD-driven loss is reported as computed:
-        AOD = 0.15 (clean rural)   -> loss = 1.2 %
-        AOD = 0.50 (typical urban) -> loss = 4.0 %
-        AOD = 1.00 (Delhi winter)  -> loss = 8.0 %
-        AOD = 1.50 (severe event)  -> loss = 12.0 %
-
-    Why AOD instead of DBSI:
-      DBSI (Sentinel-2 spectral index) measures bare soil exposure -- a dust
-      SOURCE proxy two steps removed from actual panel soiling. The conversion
-      from DBSI to loss % requires an arbitrary normalisation range that forces
-      the output to match assumed literature values.
-
-      MODIS MAIAC AOD directly measures the atmospheric aerosol column loading
-      that causes soiling via dry deposition. The physics chain is:
-        AOD -> aerosol surface concentration -> deposition flux -> loss
-      The single coefficient (SOILING_COEFFICIENT) is physically motivated and
-      its units correspond directly to a measurable deposition process.
-
-      Urban India has AOD 3-5x higher than surrounding rural areas, making this
-      a genuinely urban-specific penalty consistent with the project problem statement.
-
-    Data source:
-      MODIS MAIAC MCD19A2 v061 (Lyapustin et al. 2011), 1 km daily.
-      MAIAC is specifically designed for urban and bright-surface retrievals where
-      the standard MODIS dark-target algorithm fails.
-      Annual mean of valid daily retrievals (cloudy days excluded automatically
-      by MODIS QA masking in GEE).
+    Source: MODIS MAIAC MCD19A2 v061 (Lyapustin et al. 2011), 1 km daily -- MAIAC is the
+    one that actually works over bright urban surfaces where dark-target fails. We take the
+    annual mean of valid retrievals (GEE's QA masking drops the cloudy days).
     """
 
     MAIAC_COLLECTION = "MODIS/061/MCD19A2_GRANULES"
@@ -500,21 +417,9 @@ class SoilingPenalty:
         scale_m: float = 1000.0,
     ) -> Dict[str, Any]:
         """
-        Compute soiling retention factor from MODIS MAIAC AOD.
-
-        Parameters
-        ----------
-        aoi                 : GEE geometry of the area under study.
-        start_date          : ISO date; year is extracted for the annual composite.
-        soiling_coefficient : Fractional loss per unit mean AOD per year (default 0.08).
-        scale_m             : reduceRegion scale; MAIAC native is ~1000 m.
-
-        Returns dict keys:
-          mean_aod_550nm          -- annual mean AOD at 550 nm over AOI
-          soiling_loss_fraction   -- mean_AOD * soiling_coefficient  (uncapped)
-          soiling_retention_factor-- 1 - loss
-          soiling_coefficient     -- coefficient used
-          source                  -- "reduceRegion" | "fallback_urban_midpoint"
+        Soiling retention from MAIAC AOD. Year comes from start_date; scale_m near MAIAC's
+        1 km. Returns the mean AOD, the loss fraction (mean_AOD * coefficient, uncapped),
+        the retention factor (1 - loss), the coefficient, and a source tag.
         """
         year = int(start_date[:4])
         aod_img = cls.aod_image(aoi, year)
@@ -556,43 +461,16 @@ def net_irradiance_image(
     sky_view_factor: Optional[Any] = None,
 ) -> ee.Image:
     """
-    Per-pixel net irradiance after all penalty layers with beam/diffuse correction.
+    Stitches the penalty layers into one per-pixel net-irradiance image:
 
-    Formula:
-      net = GHI * [ diffuse_fraction * SVF + beam_fraction * (1 - shadow_frequency) ]
-                * uhi_derate * soiling_retention
+      net = GHI * [ diffuse_frac * SVF + beam_frac * (1 - shadow_freq) ] * uhi * soiling
 
-    Derivation:
-      GHI = DHI + DNI_h  (diffuse + direct horizontal)
-      Shadows block only the beam (DNI_h); the diffuse (DHI) reaches the rooftop from
-      the visible sky, whose fraction is the Sky View Factor (SVF).
-        net = DHI * SVF + DNI_h * (1 - shadow_frequency)
-            = GHI * diffuse_fraction * SVF + GHI * beam_fraction * (1 - shadow_frequency)
-
-    With SVF = 1 (open sky) this collapses to the previous beam-only correction
-    GHI * (1 - shadow_frequency * beam_fraction), so callers that omit sky_view_factor
-    are unaffected.
-
-    Parameters
-    ----------
-    baseline_kwh_m2_period : float
-        ERA5-Land GHI integrated over the accounting period (kWh/m^2).
-    shadow_frequency : ee.Image
-        Per-pixel insolation-weighted shadow frequency [0, 1]; band 'shadow_frequency'.
-        From ShadowPenalty.frequency().
-    beam_fraction : float
-        Fraction of GHI that is direct beam, computed from ERA5 HOURLY
-        total_sky_direct_solar_radiation_at_surface / surface_solar_radiation_downwards.
-        Default 1.0 preserves old behaviour if caller does not pass it.
-    uhi_derate : float
-        Scalar from UHIPenalty.stats()['uhi_derate_factor'].
-    soiling_retention : float
-        Scalar from SoilingPenalty.stats()['soiling_retention_factor'].
-    sky_view_factor : ee.Image | float | None
-        Per-pixel Sky View Factor [0, 1] from SkyViewFactor.image(), a scalar, or
-        None. None (or 1.0) means an unobstructed sky -> full diffuse received.
-
-    Returns ee.Image band 'net_irradiance_kwh_m2_period'.
+    The bracket is the whole point: split GHI into diffuse + beam, then knock the beam
+    down by shadows and the diffuse down by the sky-view factor. Pass sky_view_factor
+    as an image or a scalar; leave it None for an open sky (SVF=1), which reduces to the
+    old beam-only form GHI * (1 - shadow_freq * beam_frac) -- handy for the shadow-only
+    stage. uhi/soiling are plain scalars from their stats() calls. Band out:
+    'net_irradiance_kwh_m2_period'.
     """
     diffuse_fraction = 1.0 - beam_fraction
 

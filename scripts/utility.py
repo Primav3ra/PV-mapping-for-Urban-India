@@ -1,6 +1,7 @@
 """
-SolarMappingUtils: GEE init + thin wrappers over datasets / rooftops / irradiance_baseline.
-All heavy computation stays in the domain modules; this class exists for the FastAPI layer.
+SolarMappingUtils -- a thin convenience layer over datasets / rooftops /
+irradiance_baseline for the FastAPI code to lean on. It inits EE and forwards calls; the
+real work lives in the domain modules, not here.
 """
 from __future__ import annotations
 

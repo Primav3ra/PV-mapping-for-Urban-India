@@ -1,13 +1,10 @@
 """
-Solar altitude and azimuth (degrees, azimuth clockwise from north) for shadow modelling.
+Where the sun is (altitude + azimuth, degrees) at a given instant -- feeds the shadow
+model. The point is to sample sun positions that actually match the window the user
+picked: solstices/equinoxes for a year, mid-month days for a quarter, a few days for a
+month, or a single day. Everything's in UTC to line up with ERA5.
 
-Used to align insolation-weighted shadow sampling with the user's selected date window:
-  yearly   -> key astronomical dates within that calendar year
-  quarterly-> mid-month days within that quarter
-  monthly  -> representative days within selected month
-  daily    -> single calendar day (UTC date; ERA5 is UTC-based)
-
-Pure math (stdlib only). Azimuth matches penalties.py convention: from geographic north, 0-360.
+Just stdlib math. Azimuth is clockwise from geographic north (0-360), same as penalties.py.
 """
 
 from __future__ import annotations

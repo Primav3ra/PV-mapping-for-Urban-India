@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Literal
@@ -412,13 +413,39 @@ _EE_INIT_PROJECT: Optional[str] = None
 
 def _ensure_ee(project_id: str) -> None:
     """
-    Initialize Earth Engine once per process (re-init only if the project changes).
-    Avoids a redundant ee.Initialize round-trip on every request.
+    Spin EE up once per process (only re-inits if the project id changes) so we're not
+    paying for ee.Initialize on every request.
+
+    Credential hunt, in order: GEE_SA_JSON (whole key pasted into an env var -- easiest
+    on Render/Fly), GEE_SA_KEY_FILE (a key file path), the service account Cloud Run
+    attaches to the revision (keyless, what prod uses), and finally your local
+    `earthengine authenticate` creds for dev.
     """
     global _EE_INIT_PROJECT
-    if _EE_INIT_PROJECT != project_id:
+    if _EE_INIT_PROJECT == project_id:
+        return
+
+    sa_email = os.environ.get("GEE_SERVICE_ACCOUNT")
+    sa_json = os.environ.get("GEE_SA_JSON")
+    sa_key_file = os.environ.get("GEE_SA_KEY_FILE")
+
+    if sa_json:
+        email = sa_email or json.loads(sa_json).get("client_email")
+        ee.Initialize(ee.ServiceAccountCredentials(email, key_data=sa_json), project=project_id)
+    elif sa_key_file:
+        ee.Initialize(ee.ServiceAccountCredentials(sa_email, key_file=sa_key_file), project=project_id)
+    elif os.environ.get("K_SERVICE"):
+        # on Cloud Run -- just ride the attached service account, no key file to manage
+        import google.auth
+        adc, _ = google.auth.default(scopes=[
+            "https://www.googleapis.com/auth/earthengine",
+            "https://www.googleapis.com/auth/cloud-platform",
+        ])
+        ee.Initialize(adc, project=project_id)
+    else:
         ee.Initialize(project=project_id)
-        _EE_INIT_PROJECT = project_id
+
+    _EE_INIT_PROJECT = project_id
 
 
 def _build_roof_layers(
@@ -428,8 +455,9 @@ def _build_roof_layers(
     min_height_m: float,
 ) -> Tuple[ee.Image, ee.Image, ee.Image]:
     """
-    Shared rooftop-layer construction for /api/yield, /api/tiles and /api/series.
-    Returns (buildings_raster, building_height, roof_mask) with terrain exclusion applied.
+    Build the roof mask once (buildings -> height + candidate mask -> drop steep slopes)
+    so yield/tiles/series all work off the exact same rooftop.
+    Returns (buildings_raster, building_height, roof_mask).
     """
     buildings_raster = get_open_buildings_temporal(aoi, year=roof_year)
     building_height = (
@@ -454,8 +482,8 @@ def _select_target_building(
     confidence: float,
 ) -> Tuple[ee.Geometry, Dict[str, Any], Dict[str, Any], str, Optional[str]]:
     """
-    Pick the Open Buildings polygon at the AOI centroid, with buffer + AOI fallbacks.
-    Returns (building_geom, building_props, building_geojson_feature, source, warning).
+    Grab the building footprint under the click. Returns
+    (building_geom, building_props, building_geojson_feature, source, warning).
     """
     tb = (
         get_open_buildings_vector(aoi, confidence_threshold=confidence)
@@ -466,8 +494,8 @@ def _select_target_building(
     source = "vector_centroid_point"
     warning: Optional[str] = None
 
-    # A point on a polygon edge (or a low-confidence building) can yield empty;
-    # retry with a small buffer, then fall back to the AOI roof mask.
+    # a bare point misses when the click lands on an edge / low-confidence footprint,
+    # so nudge out 30 m, and if that still finds nothing just use the whole AOI
     if tb is None:
         try:
             tb = (
@@ -743,15 +771,9 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             selection_warning,
         ) = _select_target_building(aoi, coords, centroid, req.building_confidence)
 
-        # ------------------------------------------------------------------
-        # Stage irradiance images (per-pixel kWh/m^2 for the period), all on the
-        # SAME building geometry so stage losses are directly comparable:
-        #   baseline : GHI, no penalties
-        #   shadow   : beam blocking only (SVF = 1, diffuse fully received)
-        #   svf      : shadow + diffuse occlusion (Sky View Factor)
-        #   uhi      : shadow + svf + uhi
-        #   net      : shadow + svf + uhi + soiling  (== net_irr, already built)
-        # ------------------------------------------------------------------
+        # Each stage adds one more penalty on top of the last, so the per-stage drops
+        # line up: baseline (raw GHI) -> +shadow -> +sky-view -> +uhi -> +soiling(=net).
+        # net_irr is the full stack, already built above.
         baseline_irr = ee.Image.constant(regional_ghi_kwh_m2_period).rename("baseline")
         shadow_only_irr = net_irradiance_image(
             regional_ghi_kwh_m2_period, shadow_freq, beam_fraction=beam_fraction,
@@ -767,8 +789,8 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             sky_view_factor=svf_img,
         )
 
-        # Batched reduction #1: all five stage energies (kWh = irr * roof_mask * area)
-        # plus roof area, summed over the building in ONE getInfo call.
+        # Stack every stage's energy (irr * roof_mask * area) + the roof area itself into
+        # one image and sum it all in a single getInfo -- one round-trip instead of six.
         area_img = roof_mask.toFloat().multiply(ee.Image.pixelArea())
         sum_stack = (
             baseline_irr.multiply(area_img).rename("e_baseline")
@@ -782,7 +804,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             reducer=ee.Reducer.sum(), geometry=building_geom, scale=4.0, maxPixels=1e7,
         ).getInfo() or {}
 
-        # Batched reduction #2: per-pixel means of shadow frequency and SVF in ONE call.
+        # and the two means (shadow freq + SVF) share a second reduction.
         mean_stack = shadow_freq.rename("shadow_frequency").addBands(svf_img.rename("sky_view_factor"))
         mean_raw = mean_stack.reduceRegion(
             reducer=ee.Reducer.mean(), geometry=building_geom, scale=4.0, maxPixels=1e7,
@@ -829,11 +851,8 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             uhi_contrib_pct = uhi_loss_kwh / loss_total_for_split * 100.0
             soiling_contrib_pct = soiling_loss_kwh / loss_total_for_split * 100.0
 
-        # ------------------------------------------------------------------
-        # Rooftop shade matrix (6 evenly distributed 4-hour UTC buckets).
-        # Each non-empty bucket's shadow-frequency image is stacked as a band and
-        # reduced together in ONE getInfo call (instead of one call per bucket).
-        # ------------------------------------------------------------------
+        # Shade matrix: split the day into six 4-hour UTC bins. Same band-stacking trick
+        # as above -- one reduction for all six bins rather than six separate calls.
         bucket_specs = [
             ("00-04", 0, 4),
             ("04-08", 4, 8),
@@ -1015,7 +1034,7 @@ _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 
 
 def _cap_positions(pos: List[Tuple]) -> List[Tuple]:
-    """Match /api/yield's position cap so series shadow sampling is identical."""
+    # same thinning /api/yield does, so the curve's shadow matches the headline number
     return pos[::2] if len(pos) > 42 else pos
 
 
@@ -1026,12 +1045,10 @@ def _series_layout(
     lon_deg: float,
 ) -> Tuple[List[str], List[Tuple[str, str, List[Tuple]]], List[int]]:
     """
-    Build the sub-periods for the generation curve.
-
-    Returns (labels, items, bin_of) where:
-      labels : output x-axis labels
-      items  : list of (start_date, end_date_exclusive, solar_positions) to evaluate
-      bin_of : item index -> output bucket index (identity except weekly binning)
+    Work out the points on the curve. Returns (labels, items, bin_of): the x labels,
+    the (start, end, sun-positions) chunks to evaluate, and which output bucket each
+    chunk lands in -- that mapping is 1:1 except in monthly mode, where days collapse
+    into weeks.
     """
     year = win.get("calendar_year")
 
@@ -1077,20 +1094,20 @@ def _series_layout(
 @app.post("/api/series")
 def compute_series(req: YieldRequest) -> Dict[str, Any]:
     """
-    Generation curve for the selected window in a single HTTP call (vs one full
-    /api/yield per point). GHI + beam are sampled batched; the per-period shadow
-    retention is reduced one period at a time (a light, bounded EE request each)
-    so no single reduceRegion stacks every period's focal-max shadow at once.
+    The whole generation curve in one request, instead of firing /api/yield once per
+    point (that used to be 12-31 round-trips). GHI and beam come from a couple of
+    batched samples; the shadow part is reduced per period so no single EE request has
+    to chew through every period's shadow at once -- do that and it OOMs.
 
-      yearly    -> 12 monthly points
-      quarterly -> the quarter's 3 monthly points
-      monthly   -> daily yields binned into weeks W1..W5
-      daily     -> single point
+        yearly    -> 12 monthly points
+        quarterly -> the quarter's 3 months
+        monthly   -> daily, binned into weeks W1..W5
+        daily     -> one point
 
-    Uses the exact factorization of net_irradiance_image:
-      net_period = GHI * uhi * soiling * eff*PR*packing
-                   * [ (1-beam) * SUM(SVF*area) + beam * SUM((1-shadow_freq)*area) ]
-    so each point equals what /api/yield would return for that sub-window.
+    Under the hood it's just net_irradiance_image factored out:
+        net = GHI * uhi * soiling * eff*PR*packing
+              * [ (1-beam)*SUM(SVF*area) + beam*SUM((1-shadow)*area) ]
+    so a point here matches what /api/yield gives for that sub-window.
     """
     try:
         try:
@@ -1121,22 +1138,21 @@ def compute_series(req: YieldRequest) -> Dict[str, Any]:
         svf_img = SkyViewFactor.image(building_height)
         area_img = roof_mask.toFloat().multiply(ee.Image.pixelArea())
 
-        # Per-sub-period scalars: GHI (1 getInfo) and beam fraction (1 getInfo).
+        # GHI + beam for every sub-period -- two batched point samples.
         windows = [(s, e) for (s, e, _pos) in items]
         ghi_list = sample_era5_period_ghi_multi(centroid, windows, scale_m=ERA5_SCALE_M)
         beam_list = sample_era5_beam_multi(centroid, windows, scale_m=_ERA5_HOURLY_SCALE_M)
 
-        # SUM(SVF*area) is static across sub-periods -> one reduction.
+        # SVF*area doesn't change month to month, so grab it once.
         svf_area = float(
             (svf_img.multiply(area_img).rename("svf_area")
              .reduceRegion(ee.Reducer.sum(), building_geom, 4.0, maxPixels=1e7)
              .getInfo() or {}).get("svf_area") or 0.0
         )
 
-        # SUM((1-shadow_freq)*area) varies per sub-period (solar geometry differs).
-        # Reduce each period on its own: one period carries ~one window of solar
-        # positions -- the same focal-max load a single /api/yield handles. Stacking
-        # all periods into one reduceRegion would exceed EE's per-request memory.
+        # The (1-shadow) part DOES change per period (sun moves), so walk them one by
+        # one. Each is about the load /api/yield handles fine; stacking all 12 into a
+        # single reduce is what tripped the memory limit and blanked the curve earlier.
         retained_beam_area = []
         for (_s, _e, pos) in items:
             shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=pos)
@@ -1146,7 +1162,7 @@ def compute_series(req: YieldRequest) -> Dict[str, Any]:
             ).getInfo() or {}
             retained_beam_area.append(float(raw.get("ba") or 0.0))
 
-        # UHI + soiling are annual (static across the sub-periods of one year).
+        # uhi + soiling are annual numbers, so compute once and reuse for every point.
         uhi = UHIPenalty.stats(aoi, items[0][0])
         soiling = SoilingPenalty.stats(aoi, items[0][0])
         derate = float(uhi["uhi_derate_factor"]) * float(soiling["soiling_retention_factor"])

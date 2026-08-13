@@ -1,6 +1,6 @@
 """
-Centralized GEE dataset loaders for the PV mapping pipeline.
-All catalog IDs and band names are documented for reproducibility.
+One place for all the Earth Engine dataset loaders + their catalog IDs, so the IDs
+aren't scattered across the codebase.
 """
 from __future__ import annotations
 
@@ -35,9 +35,9 @@ def get_dem(aoi: ee.Geometry, dem_type: str = "srtm") -> ee.Image:
 
 def get_open_buildings_temporal(aoi: ee.Geometry, year: Optional[int] = None) -> ee.Image:
     """
-    Open Buildings 2.5D Temporal mosaic clipped to aoi.
-    Bands: building_presence, building_height, building_fractional_count.
-    year: 2016-2023; defaults to latest available (2023).
+    Open Buildings 2.5D Temporal mosaic over aoi (bands: presence, height,
+    fractional_count). Pass a year (2016-2023) to pin the vintage; otherwise you get the
+    latest.
     """
     col = ee.ImageCollection(CATALOG["open_buildings_temporal"]).filterBounds(aoi)
     if year is not None:

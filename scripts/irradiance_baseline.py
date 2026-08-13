@@ -1,23 +1,15 @@
 """
-ERA5 irradiance baselines and beam/diffuse split for the PV mapping pipeline.
+ERA5 irradiance -- the GHI baseline and the beam/diffuse split.
 
-GHI baseline
-  Collection : ECMWF/ERA5_LAND/HOURLY
-  Band       : surface_solar_radiation_downwards_hourly (J/m^2 per hour)
-  Resolution : ~9 km (0.1 deg native)
-  Unit conv  : J/m^2 / 3,600,000 = kWh/m^2
+GHI comes from ERA5-Land hourly (ECMWF/ERA5_LAND/HOURLY, band
+surface_solar_radiation_downwards_hourly, ~9 km). It's J/m^2 per hour, so divide by 3.6e6
+for kWh/m^2.
 
-Beam fraction (direct/GHI split)
-  Collection : ECMWF/ERA5/HOURLY
-  Bands      : surface_solar_radiation_downwards        (GHI, J/m^2 accumulated)
-               total_sky_direct_solar_radiation_at_surface (direct HI, J/m^2)
-  Resolution : ~28 km (0.25 deg native)
-  Usage      : beam_fraction = sum(direct) / sum(GHI) over the period.
-               Used to correct shadow losses: only the beam component is
-               blocked by building shadows. Diffuse reaches shadowed rooftops
-               from the open sky hemisphere.
-               Typical urban India: beam_fraction 0.55-0.72 annually
-               (higher in dry season, lower during monsoon cloud cover).
+The beam fraction (how much of GHI is direct) needs the direct-radiation band, which
+ERA5-Land doesn't carry -- so that part comes from plain ERA5 hourly (~28 km) as
+sum(direct)/sum(GHI) over the period. Why we bother: shadows only knock out the direct
+beam, diffuse still reaches a shadowed roof from the open sky. Over urban India it lands
+around 0.55-0.72 a year -- higher in the dry season, lower under monsoon cloud.
 """
 from __future__ import annotations
 
@@ -313,8 +305,8 @@ def sample_era5_beam_fraction_at_point(
 
 
 # ---------------------------------------------------------------------------
-# Multi-window point sampling (batched: one getInfo for many sub-periods)
-# Used by /api/series to avoid one ERA5 request per curve point.
+# Batched point sampling -- grab many sub-periods in one getInfo (for /api/series,
+# so the curve isn't one ERA5 request per point).
 # ---------------------------------------------------------------------------
 
 def sample_era5_period_ghi_multi(
@@ -323,11 +315,9 @@ def sample_era5_period_ghi_multi(
     scale_m: float = ERA5_SCALE_M,
 ) -> list:
     """
-    Period-integrated GHI (kWh/m^2) at a point for many sub-windows in ONE getInfo.
-
-    windows : list of (start_date, end_date_exclusive) ISO strings.
-    Returns a list of floats aligned to `windows` (0.0 where the sample is missing).
-    Each window's total is identical to sample_era5_period_ghi_kwh_m2_at_point().
+    GHI (kWh/m^2) at a point for a whole list of windows, one getInfo for the lot.
+    windows are (start, end_exclusive) ISO strings; result lines up with them (0.0 if a
+    band comes back empty). Same per-window total as sample_era5_period_ghi_kwh_m2_at_point.
     """
     if not windows:
         return []
@@ -346,11 +336,8 @@ def sample_era5_beam_multi(
     scale_m: float = _ERA5_HOURLY_SCALE_M,
 ) -> list:
     """
-    Beam fraction (direct / GHI) at a point for many sub-windows in ONE getInfo.
-
-    windows : list of (start_date, end_date_exclusive) ISO strings.
-    Returns a list of beam fractions aligned to `windows`; uses the same 0.60
-    fallback as sample_era5_beam_fraction_at_point() where data is unavailable.
+    Beam fraction (direct / GHI) per window, one getInfo for all of them. Falls back to
+    0.60 for any window that has no data, same as sample_era5_beam_fraction_at_point.
     """
     if not windows:
         return []

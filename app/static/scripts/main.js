@@ -13,8 +13,7 @@ const BASE_CONFIG = {
   building_confidence: 0.7,
 };
 
-// India grid emission factor (kg CO2 / kWh). CEA CO2 Baseline Database:
-// FY2023-24 weighted-average = 0.727 tCO2/MWh (provisional FY2024-25 = 0.710).
+// India grid CO2 per kWh — CEA baseline DB, FY23-24 (0.710 is the provisional FY24-25 number).
 const GRID_EMISSION_FACTOR = 0.727;
 
 const dom = {
@@ -138,7 +137,8 @@ function inferWindow() {
 }
 
 function computePvStages(yieldData) {
-  // Prefer authoritative backend stage yields if present (prevents scope mismatches).
+  // Trust the backend's stage numbers when they're there; the fallback below is only
+  // for old/partial responses.
   const backendBaseline = Number(yieldData?.baseline_yield_kwh);
   const backendAfterShadow = Number(yieldData?.after_shadow_yield_kwh);
   const backendAfterSvf = Number(yieldData?.after_svf_yield_kwh);
@@ -158,14 +158,13 @@ function computePvStages(yieldData) {
   const soilingRetentionFactor = Number(yieldData?.soiling_retention_factor ?? 1);
 
   const afterShadowPv = hasBackendStages ? backendAfterShadow : baselinePv * meanShadowRetention;
-  // Fallback: diffuse loss = diffuse_fraction * (1 - SVF), applied to the after-shadow stage.
+  // sky-view fallback: diffuse loss is diffuse_fraction * (1 - SVF) off the shadow stage
   const afterSvfPv = hasBackendStages
     ? backendAfterSvf
     : afterShadowPv * (1 - diffuseFraction * (1 - meanSkyViewFactor));
   const afterUhiPv = hasBackendStages ? backendAfterUhi : afterSvfPv * uhiDerateFactor;
   const afterSoilingPv = hasBackendStages ? backendAfterSoiling : afterUhiPv * soilingRetentionFactor;
 
-  // Use backend's computed net value as the last stage to keep "net" consistent.
   const netPv = hasBackendStages ? backendNet : Number(yieldData?.period_yield_kwh ?? afterSoilingPv);
 
   const totalLossPv = Math.max(0, baselinePv - netPv);
@@ -176,9 +175,9 @@ function computePvStages(yieldData) {
 
   const pctOfLoss = (pv) => (totalLossPv > 0 ? (pv / totalLossPv) * 100 : 0);
 
-  // Stage-wise penalty (loss) percentages derived from the stage YIELDS themselves,
-  // so each displayed % is exactly the drop in the kWh shown next to it. (Previously
-  // the shadow % used an area-mean shadow-retention metric that did not match its kWh.)
+  // %s come straight off the stage yields so the number next to each row is literally
+  // the drop in the kWh you see. (The old shadow % used a mean-retention figure that
+  // didn't line up with its own kWh — confusing, so gone.)
   const shadowPenaltyPercent = baselinePv > 0 ? (1 - afterShadowPv / baselinePv) * 100 : 0;
   const svfPenaltyPercent = afterShadowPv > 0 ? (1 - afterSvfPv / afterShadowPv) * 100 : 0;
   const uhiPenaltyPercent = afterSvfPv > 0 ? (1 - afterUhiPv / afterSvfPv) * 100 : 0;
@@ -290,9 +289,9 @@ function renderKpis(yieldData, temporalWindow) {
   const days = daysInRange(temporalWindow.start_date, temporalWindow.end_date_exclusive);
   const dailyAvg = potential / days;
 
-  // Estimated installed DC capacity (kWp) = usable roof area * packing factor * module
-  // efficiency at STC (1 kW/m^2). This is the true nameplate the yield is built on -- not
-  // the old "peak power = energy/(days*5h)" heuristic, which was neither a peak nor a capacity.
+  // Estimated DC nameplate: usable roof * packing * module efficiency (at 1 kW/m^2 STC).
+  // This is the actual size the yield is built on -- the old "energy/(days*5h)" number
+  // was neither a peak nor a capacity, so it's gone.
   const roofArea = Number(yieldData.roof_area_m2 ?? 0);
   const packing = Number(yieldData.packing_factor ?? BASE_CONFIG.packing_factor);
   const panelEff = Number(yieldData.panel_efficiency ?? BASE_CONFIG.panel_efficiency);
@@ -538,7 +537,7 @@ async function runCompute() {
       return;
     }
     state.lastYield = yieldData;
-    // Temporal window comes straight from the yield response (no separate baseline call).
+    // dates come off the yield response now -- no separate /api/baseline call
     const temporalWindow = {
       start_date: yieldData.start_date,
       end_date_exclusive: yieldData.end_date_exclusive,
@@ -560,7 +559,7 @@ async function runCompute() {
     }
 
     setStatus('Computing trend curve...');
-    // Whole curve in one server-side call instead of one /api/yield per point.
+    // one call for the whole curve now, not one /api/yield per point
     const series = await fetchSeries({ ...payloadBase, ...temporal });
     const hasSeries = series && series.status === 'ok'
       && Array.isArray(series.values) && series.values.length > 0;

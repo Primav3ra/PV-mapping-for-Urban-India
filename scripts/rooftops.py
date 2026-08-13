@@ -1,10 +1,9 @@
 """
-Rooftop candidate mask and area from Open Buildings 2.5D Temporal (GEE).
+Rooftop candidate mask + area, off the Open Buildings 2.5D layer.
 
-Design choices (defaults):
-- building_presence > 0.5: model confidence is uncalibrated; threshold is a tunable prior.
-- min_height_m: optional floor to drop low/noise structures (0 = disabled).
-- reduceRegion scale=4 m: matches ~4 m effective resolution of Open Buildings temporal.
+A few defaults worth knowing: presence > 0.5 is just a prior (the model's confidence
+isn't calibrated, so tune it if needed); min_height_m lets you drop low/noise structures
+but is off by default; and we reduce at 4 m to match Open Buildings' effective resolution.
 """
 
 from __future__ import annotations
@@ -24,21 +23,8 @@ def build_rooftop_candidate_mask(
     min_height_m: float = 0.0,
 ) -> ee.Image:
     """
-    Binary mask (0/1) of rooftop candidate pixels from Open Buildings bands.
-
-    Parameters
-    ----------
-    buildings : ee.Image
-        Must include bands building_presence, building_height.
-    presence_threshold : float
-        Pixels with building_presence > threshold are candidates (default 0.5).
-    min_height_m : float
-        Require building_height >= this value (m). Use 0 to disable.
-
-    Returns
-    -------
-    ee.Image
-        Single band 'roof_candidate', values 0 or 1, uint8.
+    0/1 mask of likely-rooftop pixels: presence over the threshold, and (optionally)
+    tall enough. `buildings` needs the presence + height bands. Band out: 'roof_candidate'.
     """
     presence = buildings.select("building_presence")
     height = buildings.select("building_height")
@@ -55,15 +41,13 @@ def apply_terrain_exclusion(
     scale_m: float = 4.0,
 ) -> ee.Image:
     """
-    Multiply roof mask by terrain exclusion (1 = keep, 0 = exclude steep slopes).
-
-    Reprojects exclusion to the building layer projection for alignment.
+    AND the roof mask with the terrain keep-mask (drops steep slopes). Reprojects the
+    exclusion onto the building layer's grid first so the pixels line up.
     """
     ref = buildings.select("building_presence")
     proj = ref.projection()
     exclusion_repr = exclusion_mask.reproject(crs=proj, scale=scale_m).toFloat()
-    # exclusion_mask is 0/1; ensure binary
-    exclusion_bin = exclusion_repr.gt(0.5)
+    exclusion_bin = exclusion_repr.gt(0.5)   # re-binarize after the resample
     combined = roof_mask.multiply(exclusion_bin.toUint8())
     return combined.rename("roof_candidate").toUint8()
 
@@ -75,14 +59,8 @@ def rooftop_area_m2_reduce(
     tile_scale: int = 4,
     max_pixels: int = 10_000_000,
 ) -> ee.Dictionary:
-    """
-    Total area (m^2) of pixels where roof_mask == 1 inside aoi.
-
-    Returns
-    -------
-    ee.Dictionary
-        Keys include 'roof_candidate' with sum in square meters.
-    """
+    """Total roof area (m^2) inside aoi -- sum of pixel areas where the mask is 1.
+    Comes back as an ee.Dictionary keyed 'roof_candidate'."""
     area_img = roof_mask.multiply(ee.Image.pixelArea())
     return area_img.reduceRegion(
         reducer=ee.Reducer.sum(),
@@ -95,10 +73,8 @@ def rooftop_area_m2_reduce(
 
 def choose_reduce_scale_m(aoi_area_km2: float) -> float:
     """
-    Pick reduceRegion scale to limit memory on huge polygons (full-city AOIs).
-
-    Open Buildings is ~4 m; coarser scale underestimates fragmented edges slightly
-    but keeps city-wide runs feasible.
+    Coarsen the reduce scale on big AOIs so city-wide runs don't blow up on memory.
+    Native is ~4 m; going coarser nibbles a bit off fragmented edges but keeps it running.
     """
     if aoi_area_km2 <= 25:
         return 4.0
@@ -117,14 +93,10 @@ def get_rooftop_area_m2_info(
     tile_scale: int = 4,
 ) -> Dict[str, Any]:
     """
-    End-to-end: load Open Buildings, build mask, optional terrain filter, return plain dict (uses getInfo).
-
-    Use from API / run_analysis; for tests that only need EE objects, call lower-level functions.
-
-    Parameters
-    ----------
-    scale_m : float, optional
-        reduceRegion scale in meters. If None, chosen from AOI area via choose_reduce_scale_m().
+    The whole thing end to end -> plain dict (calls getInfo). Loads buildings, builds the
+    mask, optionally filters terrain, sums the area. This is the API-facing helper; tests
+    that just want EE objects should call the lower-level functions instead. Leave scale_m
+    as None to let choose_reduce_scale_m() pick one from the AOI size.
     """
     if scale_m is None:
         aoi_km2 = float(aoi.area().divide(1e6).getInfo())
