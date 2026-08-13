@@ -20,9 +20,13 @@ export function fmtArea(m2) {
   return `${Math.round(m2).toLocaleString()} m\u00b2`;
 }
 
+// India grid emission factor (kg CO2 / kWh) -- CEA CO2 Baseline Database FY2023-24
+// weighted average (0.727 tCO2/MWh). Keep in sync with GRID_EMISSION_FACTOR in main.js.
+const GRID_EMISSION_FACTOR = 0.727;
+
 export function fmtCo2(kwhYear) {
   if (!kwhYear) return '-';
-  const kg = kwhYear * 0.82;
+  const kg = kwhYear * GRID_EMISSION_FACTOR;
   if (kg >= 1000) return `${(kg / 1000).toFixed(1)} tCO\u2082/yr`;
   return `${kg.toFixed(0)} kg CO\u2082/yr`;
 }

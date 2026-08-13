@@ -5,9 +5,9 @@ All heavy computation stays in the domain modules; this class exists for the Fas
 from __future__ import annotations
 
 import ee
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from scripts.datasets import get_dem as _get_dem, get_available_datasets as _get_datasets_info
+from scripts.datasets import get_dem as _get_dem
 from scripts.rooftops import get_rooftop_area_m2_info as _get_rooftop_area_m2_info
 from scripts.irradiance_baseline import (
     get_era5_baseline_info as _get_era5_baseline_info,
@@ -24,26 +24,6 @@ class SolarMappingUtils:
     def __init__(self, project_id: str):
         self.project_id = project_id
         ee.Initialize(project=project_id)
-
-    # ------------------------------------------------------------------
-    # AOI helpers
-    # ------------------------------------------------------------------
-
-    def create_aoi_from_coordinates(self, coordinates: List[List[float]]) -> ee.Geometry:
-        return ee.Geometry.Polygon(coordinates)
-
-    def load_aoi_from_geojson(self, geojson_path: str) -> ee.Geometry:
-        import json
-        with open(geojson_path) as f:
-            data = json.load(f)
-        return ee.Geometry.Polygon(data["features"][0]["geometry"]["coordinates"][0])
-
-    # ------------------------------------------------------------------
-    # Dataset catalogue
-    # ------------------------------------------------------------------
-
-    def get_available_datasets(self) -> Dict[str, Any]:
-        return _get_datasets_info()
 
     # ------------------------------------------------------------------
     # Terrain

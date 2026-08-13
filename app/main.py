@@ -18,7 +18,7 @@ from scripts.irradiance_baseline import (
 )
 from scripts.penalties import (
     net_irradiance_image,
-    UHIPenalty, SoilingPenalty, ShadowPenalty,
+    UHIPenalty, SoilingPenalty, ShadowPenalty, SkyViewFactor,
 )
 from scripts.solar_geometry import (
     solar_positions_yearly,
@@ -361,6 +361,8 @@ class YieldRequest(BaseModel):
     end_date_exclusive: Optional[str] = None
     panel_efficiency: float = 0.18
     performance_ratio: float = 0.80
+    packing_factor: float = 0.7  # usable-roof coverage fraction: panels never tile 100% of a roof
+                                 # (setbacks, obstructions, water tanks, access). Typical 0.6-0.75.
     building_confidence: float = 0.7
 
 
@@ -379,7 +381,7 @@ class TilesRequest(BaseModel):
     month: Optional[int] = None
     start_date: Optional[str] = None
     end_date_exclusive: Optional[str] = None
-    layer: Literal["roof_mask", "shadow_frequency", "net_irradiance", "combined_derate", "temperature_delta"] = "roof_mask"
+    layer: Literal["roof_mask", "shadow_frequency", "sky_view_factor", "net_irradiance", "combined_derate", "temperature_delta"] = "roof_mask"
 
 
 class BuildingsRequest(BaseModel):
@@ -428,6 +430,7 @@ def tiles(req: TilesRequest) -> Dict[str, Any]:
     Layers:
       - roof_mask: rooftop candidate mask (0/1)
       - shadow_frequency: shadow frequency (0..1)
+      - sky_view_factor: fraction of diffuse sky visible from the rooftop (0..1)
       - net_irradiance: net irradiance (kWh/m^2 over window)
       - combined_derate: uhi_derate * soiling_retention (scalar image)
       - temperature_delta: UHI delta temperature (MODIS LST daytime anomaly; degC)
@@ -469,6 +472,7 @@ def tiles(req: TilesRequest) -> Dict[str, Any]:
 
         solar_positions = _solar_positions_for_window(lat_deg, lon_deg, win)
         shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=solar_positions)
+        svf_img = SkyViewFactor.image(building_height)
 
         # Scalars needed for net irradiance (same as /api/yield)
         ghi_info = sample_era5_period_ghi_kwh_m2_at_point(centroid, s, e, scale_m=ERA5_SCALE_M)
@@ -485,6 +489,7 @@ def tiles(req: TilesRequest) -> Dict[str, Any]:
             beam_fraction=beam_fraction,
             uhi_derate=float(uhi_info["uhi_derate_factor"]),
             soiling_retention=float(soiling_info["soiling_retention_factor"]),
+            sky_view_factor=svf_img,
         )
 
         if req.layer == "roof_mask":
@@ -493,8 +498,12 @@ def tiles(req: TilesRequest) -> Dict[str, Any]:
         elif req.layer == "shadow_frequency":
             img = shadow_freq.clamp(0, 1)
             vis = {"min": 0, "max": 1, "palette": ["0b1020", "f97316"]}
+        elif req.layer == "sky_view_factor":
+            img = svf_img.clip(aoi).clamp(0, 1)
+            # Low SVF (sky blocked) -> warm; high SVF (open sky) -> cool/green.
+            vis = {"min": 0.5, "max": 1.0, "palette": ["ef4444", "f59e0b", "22c55e"]}
         elif req.layer == "temperature_delta":
-            # UHI = urban mean LST - ~20km background focal mean (see UHIPenalty.stats).
+            # UHI = urban mean LST - ~30km background focal mean (see UHIPenalty.stats).
             uhi_year = int(s[:4])
             lst = (
                 ee.ImageCollection(UHIPenalty.MODIS_COLLECTION)
@@ -738,9 +747,15 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=solar_positions)
 
         # Beam fraction: direct / GHI from ERA5 HOURLY -- used to correct shadow losses.
-        # Only the beam component is blocked by shadows; diffuse is unaffected for rooftops.
+        # Only the beam component is blocked by shadows; diffuse is governed by SVF below.
         beam_info = sample_era5_beam_fraction_at_point(centroid, s, e)
         beam_fraction = float(beam_info["beam_fraction"])
+
+        # Sky View Factor: per-pixel fraction of the diffuse sky still visible from the
+        # rooftop after neighbouring buildings occlude part of the hemisphere. Diffuse
+        # counterpart of the shadow (beam) penalty; both come from the same height raster.
+        # (Mean SVF is reduced once, over the building geometry, further below.)
+        svf_img = SkyViewFactor.image(building_height)
 
         uhi_info = UHIPenalty.stats(aoi, s)
         soiling_info = SoilingPenalty.stats(aoi, s)
@@ -751,6 +766,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             beam_fraction=beam_fraction,
             uhi_derate=uhi_info["uhi_derate_factor"],
             soiling_retention=soiling_info["soiling_retention_factor"],
+            sky_view_factor=svf_img,
         )
 
         target_building = (
@@ -850,9 +866,10 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         #
         # All values below are PV output (kWh) and are directly comparable:
         #   baseline_yield_kwh          : no penalties (GHI * roof_area * eff * PR)
-        #   after_shadow_yield_kwh      : apply shadow (beam-corrected) only
-        #   after_uhi_yield_kwh         : shadow + uhi
-        #   after_soiling_yield_kwh     : shadow + uhi + soiling  (== net)
+        #   after_shadow_yield_kwh      : apply shadow (beam blocking) only
+        #   after_svf_yield_kwh         : shadow + sky-view (diffuse blocking)
+        #   after_uhi_yield_kwh         : shadow + svf + uhi
+        #   after_soiling_yield_kwh     : shadow + svf + uhi + soiling  (== net)
         # ------------------------------------------------------------------
 
         def _sum_kwh(img_kwh_m2: ee.Image, band: str) -> float:
@@ -872,12 +889,23 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             return float((sraw or {}).get("kwh_pixel") or 0.0)
 
         baseline_irr = ee.Image.constant(regional_ghi_kwh_m2_period).rename("baseline_ghi_kwh_m2_period")
+        # after_shadow: beam blocking only, diffuse still fully received (SVF = 1)
         shadow_only_irr = net_irradiance_image(
             regional_ghi_kwh_m2_period,
             shadow_freq,
             beam_fraction=beam_fraction,
             uhi_derate=1.0,
             soiling_retention=1.0,
+            sky_view_factor=None,
+        )
+        # after_svf: shadow + diffuse occlusion from Sky View Factor
+        svf_only_irr = net_irradiance_image(
+            regional_ghi_kwh_m2_period,
+            shadow_freq,
+            beam_fraction=beam_fraction,
+            uhi_derate=1.0,
+            soiling_retention=1.0,
+            sky_view_factor=svf_img,
         )
         uhi_only_irr = net_irradiance_image(
             regional_ghi_kwh_m2_period,
@@ -885,18 +913,25 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             beam_fraction=beam_fraction,
             uhi_derate=float(uhi_info["uhi_derate_factor"]),
             soiling_retention=1.0,
+            sky_view_factor=svf_img,
         )
-        soiling_irr = net_irr  # shadow + uhi + soiling (already built)
+        soiling_irr = net_irr  # shadow + svf + uhi + soiling (already built)
 
         baseline_roof_kwh = _sum_kwh(baseline_irr, "baseline_ghi_kwh_m2_period")
         after_shadow_roof_kwh = _sum_kwh(shadow_only_irr, "net_irradiance_kwh_m2_period")
+        after_svf_roof_kwh = _sum_kwh(svf_only_irr, "net_irradiance_kwh_m2_period")
         after_uhi_roof_kwh = _sum_kwh(uhi_only_irr, "net_irradiance_kwh_m2_period")
         after_soiling_roof_kwh = float(stats.get("energy_kwh_pixel") or 0.0)
 
-        baseline_yield_kwh = baseline_roof_kwh * req.panel_efficiency * req.performance_ratio
-        after_shadow_yield_kwh = after_shadow_roof_kwh * req.panel_efficiency * req.performance_ratio
-        after_uhi_yield_kwh = after_uhi_roof_kwh * req.panel_efficiency * req.performance_ratio
-        after_soiling_yield_kwh = after_soiling_roof_kwh * req.panel_efficiency * req.performance_ratio
+        # packing_factor: usable-roof coverage fraction. Applied uniformly to every
+        # stage so penalty percentages are unchanged; only absolute kWh scale down to
+        # reflect that panels cover ~60-75% of a roof, not 100%.
+        yield_scale = req.panel_efficiency * req.performance_ratio * req.packing_factor
+        baseline_yield_kwh = baseline_roof_kwh * yield_scale
+        after_shadow_yield_kwh = after_shadow_roof_kwh * yield_scale
+        after_svf_yield_kwh = after_svf_roof_kwh * yield_scale
+        after_uhi_yield_kwh = after_uhi_roof_kwh * yield_scale
+        after_soiling_yield_kwh = after_soiling_roof_kwh * yield_scale
 
         total_energy_kwh = after_soiling_yield_kwh
 
@@ -904,15 +939,18 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         penalty_loss_pct = (penalty_loss_kwh / baseline_yield_kwh * 100.0) if baseline_yield_kwh > 0 else 0.0
 
         shadow_loss_kwh = max(0.0, baseline_yield_kwh - after_shadow_yield_kwh)
-        uhi_loss_kwh = max(0.0, after_shadow_yield_kwh - after_uhi_yield_kwh)
+        svf_loss_kwh = max(0.0, after_shadow_yield_kwh - after_svf_yield_kwh)
+        uhi_loss_kwh = max(0.0, after_svf_yield_kwh - after_uhi_yield_kwh)
         soiling_loss_kwh = max(0.0, after_uhi_yield_kwh - after_soiling_yield_kwh)
-        loss_total_for_split = shadow_loss_kwh + uhi_loss_kwh + soiling_loss_kwh
+        loss_total_for_split = shadow_loss_kwh + svf_loss_kwh + uhi_loss_kwh + soiling_loss_kwh
         if loss_total_for_split <= 0:
             shadow_contrib_pct = 0.0
+            svf_contrib_pct = 0.0
             uhi_contrib_pct = 0.0
             soiling_contrib_pct = 0.0
         else:
             shadow_contrib_pct = shadow_loss_kwh / loss_total_for_split * 100.0
+            svf_contrib_pct = svf_loss_kwh / loss_total_for_split * 100.0
             uhi_contrib_pct = uhi_loss_kwh / loss_total_for_split * 100.0
             soiling_contrib_pct = soiling_loss_kwh / loss_total_for_split * 100.0
 
@@ -974,14 +1012,42 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             round(1.0 - mean_shadow_frequency * beam_fraction, 4)
             if mean_shadow_frequency is not None else None
         )
+
+        # Mean SVF over the same building geometry (for the display-only mean irradiance).
+        svf_geo_stats = (
+            svf_img.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=building_geom,
+                scale=4.0,
+                maxPixels=1e7,
+            ).getInfo()
+        )
+        mean_sky_view_factor = (svf_geo_stats or {}).get("sky_view_factor")
+
+        diffuse_fraction = 1.0 - beam_fraction
+        # Full retention scalar: diffuse * SVF + beam * (1 - shadow). Falls back to the
+        # beam-only shadow retention if SVF could not be sampled.
+        if mean_shadow_frequency is not None and mean_sky_view_factor is not None:
+            mean_net_retention = round(
+                diffuse_fraction * float(mean_sky_view_factor)
+                + beam_fraction * (1.0 - mean_shadow_frequency),
+                4,
+            )
+        else:
+            mean_net_retention = mean_shadow_retention
+
         combined_derate = uhi_info["uhi_derate_factor"] * soiling_info["soiling_retention_factor"]
         net_irr_mean = (
-            regional_ghi_kwh_m2_period * combined_derate * mean_shadow_retention
-            if mean_shadow_retention is not None else None
+            regional_ghi_kwh_m2_period * combined_derate * mean_net_retention
+            if mean_net_retention is not None else None
         )
 
         shadow_penalty_percent = (
             round((1.0 - mean_shadow_retention) * 100.0, 2) if mean_shadow_retention is not None else None
+        )
+        svf_penalty_percent = (
+            round(diffuse_fraction * (1.0 - float(mean_sky_view_factor)) * 100.0, 2)
+            if mean_sky_view_factor is not None else None
         )
         uhi_penalty_percent = round((1.0 - uhi_info["uhi_derate_factor"]) * 100.0, 2)
         soiling_penalty_percent = round((1.0 - soiling_info["soiling_retention_factor"]) * 100.0, 2)
@@ -1000,6 +1066,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             "irradiance_source": "ERA5",
             "panel_efficiency": req.panel_efficiency,
             "performance_ratio": req.performance_ratio,
+            "packing_factor": req.packing_factor,
             # Some windows don't define quarter/month keys; keep response stable.
             "calendar_year": win.get("calendar_year"),
             "quarter": win.get("quarter"),
@@ -1012,6 +1079,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             # Authoritative stage yields (PV output, kWh)
             "baseline_yield_kwh": round(float(baseline_yield_kwh), 6),
             "after_shadow_yield_kwh": round(float(after_shadow_yield_kwh), 6),
+            "after_svf_yield_kwh": round(float(after_svf_yield_kwh), 6),
             "after_uhi_yield_kwh": round(float(after_uhi_yield_kwh), 6),
             "after_soiling_yield_kwh": round(float(after_soiling_yield_kwh), 6),
             # Loss + contribution (of total loss) in kWh / %
@@ -1019,9 +1087,11 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             "penalty_loss_pct": round(float(penalty_loss_pct), 4),
             "penalty_contribution": {
                 "shadow_loss_kwh": round(float(shadow_loss_kwh), 6),
+                "svf_loss_kwh": round(float(svf_loss_kwh), 6),
                 "uhi_loss_kwh": round(float(uhi_loss_kwh), 6),
                 "soiling_loss_kwh": round(float(soiling_loss_kwh), 6),
                 "shadow_contribution_pct": round(float(shadow_contrib_pct), 3),
+                "svf_contribution_pct": round(float(svf_contrib_pct), 3),
                 "uhi_contribution_pct": round(float(uhi_contrib_pct), 3),
                 "soiling_contribution_pct": round(float(soiling_contrib_pct), 3),
             },
@@ -1029,6 +1099,13 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             "beam_fraction": beam_fraction,
             "diffuse_fraction": beam_info["diffuse_fraction"],
             "beam_fraction_source": beam_info["source"],
+            "mean_sky_view_factor": (round(float(mean_sky_view_factor), 5)
+                                     if mean_sky_view_factor is not None else None),
+            "svf_penalty_percent": svf_penalty_percent,
+            "sky_view_factor_meta": {
+                "n_azimuth": SkyViewFactor.N_AZIMUTH,
+                "sample_radii_px": list(SkyViewFactor.DIST_PX),
+            },
             "uhi_derate_factor": uhi_info["uhi_derate_factor"],
             "delta_t_uhi_celsius": uhi_info["delta_t_uhi_celsius"],
             "soiling_retention_factor": soiling_info["soiling_retention_factor"],

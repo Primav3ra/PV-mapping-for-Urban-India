@@ -33,16 +33,27 @@ Leaflet frontend →  map UI served from app/static/
 - A Google Cloud project with the Earth Engine API enabled
 
 ```bash
+# Create and activate a virtual environment
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
 
-pip install earthengine-api fastapi uvicorn pandas numpy requests
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# Linux / macOS / WSL:
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 
 earthengine authenticate
+
+# Set your Earth Engine project ID
 # Windows (PowerShell):
 $env:GEE_PROJECT_ID="pv-mapping-india"
+# Linux / macOS / WSL:
+export GEE_PROJECT_ID="pv-mapping-india"
 ```
+
+> On Debian/Ubuntu/WSL, use `python3` instead of `python` if the `python` command is not found.
 
 ## Run locally
 

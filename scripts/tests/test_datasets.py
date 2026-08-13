@@ -54,17 +54,11 @@ def main():
         from scripts.datasets import (
             get_dem,
             get_open_buildings_temporal,
-            get_sentinel2_composite,
-            get_modis_lst_composite,
-            get_available_datasets,
         )
     except ImportError:
         from datasets import (
             get_dem,
             get_open_buildings_temporal,
-            get_sentinel2_composite,
-            get_modis_lst_composite,
-            get_available_datasets,
         )
 
     # get_dem (SRTM) - force evaluation with reduceRegion
@@ -88,42 +82,7 @@ def main():
         except Exception as e:
             print(f"      -> bandNames failed: {e}")
 
-    # Sentinel-2 composite - force evaluation (small scale)
-    s2 = run_test(
-        "get_sentinel2_composite(aoi, '2023-06-01', '2023-08-31')",
-        get_sentinel2_composite,
-        aoi,
-        "2023-06-01",
-        "2023-08-31",
-    )
-    if s2 is not None:
-        try:
-            names = s2.bandNames().getInfo()
-            print(f"      -> bands (first 6): {names[:6] if len(names) >= 6 else names}")
-        except Exception as e:
-            print(f"      -> bandNames failed: {e}")
-
-    # MODIS LST - force evaluation
-    lst = run_test(
-        "get_modis_lst_composite(aoi, '2023-06-01', '2023-08-31')",
-        get_modis_lst_composite,
-        aoi,
-        "2023-06-01",
-        "2023-08-31",
-    )
-    if lst is not None:
-        try:
-            stats = lst.reduceRegion(ee.Reducer.mean(), aoi, 1000).getInfo()
-            print(f"      -> LST mean (raw): {stats}")
-        except Exception as e:
-            print(f"      -> reduceRegion failed: {e}")
-
-    # Catalog listing (no GEE call)
-    info = run_test("get_available_datasets()", get_available_datasets)
-    if info:
-        print(f"      -> {len(info)} datasets listed")
-
-    # 3. Test utility.py integration (get_elevation_data, get_available_datasets)
+    # 3. Test utility.py integration (get_elevation_data)
     print("\nTesting utility.py integration (SolarMappingUtils)")
     try:
         from scripts.utility import SolarMappingUtils
@@ -139,7 +98,6 @@ def main():
                 print(f"      -> elevation min: {stats}")
             except Exception as e:
                 print(f"      -> reduceRegion failed: {e}")
-        run_test("utils.get_available_datasets()", utils.get_available_datasets)
 
     print("\n" + "=" * 50)
     print("Dataset verification finished.")

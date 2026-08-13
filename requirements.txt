@@ -1,0 +1,12 @@
+earthengine-api
+pandas
+numpy
+matplotlib
+seaborn
+folium
+jupyter
+requests
+fastapi
+uvicorn
+geopandas
+geemap

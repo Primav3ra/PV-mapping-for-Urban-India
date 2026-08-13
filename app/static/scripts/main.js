@@ -9,8 +9,13 @@ const BASE_CONFIG = {
   min_height_m: 0,
   panel_efficiency: 0.18,
   performance_ratio: 0.8,
+  packing_factor: 0.7,
   building_confidence: 0.7,
 };
+
+// India grid emission factor (kg CO2 / kWh). CEA CO2 Baseline Database:
+// FY2023-24 weighted-average = 0.727 tCO2/MWh (provisional FY2024-25 = 0.710).
+const GRID_EMISSION_FACTOR = 0.727;
 
 const dom = {
   toast: document.getElementById('toast'),
@@ -32,6 +37,7 @@ const dom = {
   generationChart: document.getElementById('generationChart'),
   pvBaseline: document.getElementById('pvBaseline'),
   pvAfterShadow: document.getElementById('pvAfterShadow'),
+  pvAfterSvf: document.getElementById('pvAfterSvf'),
   pvAfterUhi: document.getElementById('pvAfterUhi'),
   pvAfterSoiling: document.getElementById('pvAfterSoiling'),
   pvNet: document.getElementById('pvNet'),
@@ -135,21 +141,28 @@ function computePvStages(baselineData, yieldData) {
   // Prefer authoritative backend stage yields if present (prevents scope mismatches).
   const backendBaseline = Number(yieldData?.baseline_yield_kwh);
   const backendAfterShadow = Number(yieldData?.after_shadow_yield_kwh);
+  const backendAfterSvf = Number(yieldData?.after_svf_yield_kwh);
   const backendAfterUhi = Number(yieldData?.after_uhi_yield_kwh);
   const backendAfterSoiling = Number(yieldData?.after_soiling_yield_kwh);
   const backendNet = Number(yieldData?.period_yield_kwh);
 
-  const hasBackendStages = [backendBaseline, backendAfterShadow, backendAfterUhi, backendAfterSoiling, backendNet]
+  const hasBackendStages = [backendBaseline, backendAfterShadow, backendAfterSvf, backendAfterUhi, backendAfterSoiling, backendNet]
     .every((v) => Number.isFinite(v));
 
   const baselinePv = hasBackendStages ? backendBaseline : 0;
 
   const meanShadowRetention = Number(yieldData?.mean_shadow_retention ?? 1);
+  const meanSkyViewFactor = Number(yieldData?.mean_sky_view_factor ?? 1);
+  const diffuseFraction = Number(yieldData?.diffuse_fraction ?? 0);
   const uhiDerateFactor = Number(yieldData?.uhi_derate_factor ?? 1);
   const soilingRetentionFactor = Number(yieldData?.soiling_retention_factor ?? 1);
 
   const afterShadowPv = hasBackendStages ? backendAfterShadow : baselinePv * meanShadowRetention;
-  const afterUhiPv = hasBackendStages ? backendAfterUhi : afterShadowPv * uhiDerateFactor;
+  // Fallback: diffuse loss = diffuse_fraction * (1 - SVF), applied to the after-shadow stage.
+  const afterSvfPv = hasBackendStages
+    ? backendAfterSvf
+    : afterShadowPv * (1 - diffuseFraction * (1 - meanSkyViewFactor));
+  const afterUhiPv = hasBackendStages ? backendAfterUhi : afterSvfPv * uhiDerateFactor;
   const afterSoilingPv = hasBackendStages ? backendAfterSoiling : afterUhiPv * soilingRetentionFactor;
 
   // Use backend's computed net value as the last stage to keep "net" consistent.
@@ -157,28 +170,35 @@ function computePvStages(baselineData, yieldData) {
 
   const totalLossPv = Math.max(0, baselinePv - netPv);
   const shadowLossPv = Math.max(0, baselinePv - afterShadowPv);
-  const uhiLossPv = Math.max(0, afterShadowPv - afterUhiPv);
+  const svfLossPv = Math.max(0, afterShadowPv - afterSvfPv);
+  const uhiLossPv = Math.max(0, afterSvfPv - afterUhiPv);
   const soilingLossPv = Math.max(0, afterUhiPv - afterSoilingPv);
 
   const pctOfLoss = (pv) => (totalLossPv > 0 ? (pv / totalLossPv) * 100 : 0);
 
-  // Stage-wise penalty (loss) percentages applied by backend factors.
-  const shadowPenaltyPercent = baselinePv > 0 ? (1 - meanShadowRetention) * 100 : 0;
-  const uhiPenaltyPercent = afterShadowPv > 0 ? (1 - uhiDerateFactor) * 100 : 0;
-  const soilingPenaltyPercent = afterUhiPv > 0 ? (1 - soilingRetentionFactor) * 100 : 0;
+  // Stage-wise penalty (loss) percentages derived from the stage YIELDS themselves,
+  // so each displayed % is exactly the drop in the kWh shown next to it. (Previously
+  // the shadow % used an area-mean shadow-retention metric that did not match its kWh.)
+  const shadowPenaltyPercent = baselinePv > 0 ? (1 - afterShadowPv / baselinePv) * 100 : 0;
+  const svfPenaltyPercent = afterShadowPv > 0 ? (1 - afterSvfPv / afterShadowPv) * 100 : 0;
+  const uhiPenaltyPercent = afterSvfPv > 0 ? (1 - afterUhiPv / afterSvfPv) * 100 : 0;
+  const soilingPenaltyPercent = afterUhiPv > 0 ? (1 - afterSoilingPv / afterUhiPv) * 100 : 0;
 
   return {
     baselinePv,
     afterShadowPv,
+    afterSvfPv,
     afterUhiPv,
     afterSoilingPv,
     netPv,
     totalLossPv,
     totalLossPct: baselinePv > 0 ? (totalLossPv / baselinePv) * 100 : 0,
     shadowContributionPct: pctOfLoss(shadowLossPv),
+    svfContributionPct: pctOfLoss(svfLossPv),
     uhiContributionPct: pctOfLoss(uhiLossPv),
     soilingContributionPct: pctOfLoss(soilingLossPv),
     shadowPenaltyPercent,
+    svfPenaltyPercent,
     uhiPenaltyPercent,
     soilingPenaltyPercent,
   };
@@ -192,12 +212,12 @@ function ensurePenaltyChart() {
   state.penaltyChart = new Chart(ctxCanvas, {
     type: 'bar',
     data: {
-      labels: ['Shadow', 'Urban Heat', 'Soiling'],
+      labels: ['Shadow', 'Sky View', 'Urban Heat', 'Soiling'],
       datasets: [
         {
-          data: [0, 0, 0],
-          backgroundColor: ['#f97316', '#22c55e', '#ffb347'],
-          borderColor: ['#f97316', '#22c55e', '#ffb347'],
+          data: [0, 0, 0, 0],
+          backgroundColor: ['#f97316', '#38bdf8', '#22c55e', '#ffb347'],
+          borderColor: ['#f97316', '#38bdf8', '#22c55e', '#ffb347'],
           borderWidth: 1,
           borderRadius: 4,
         },
@@ -231,8 +251,10 @@ function renderResultBox(baselineData, yieldData) {
   dom.pvBaseline.textContent = fmtNum(stages.baselinePv, 0);
   dom.pvAfterShadow.textContent =
     stages.baselinePv > 0 ? `${fmtNum(stages.afterShadowPv, 0)} (-${stages.shadowPenaltyPercent.toFixed(1)}%)` : '-';
+  if (dom.pvAfterSvf) dom.pvAfterSvf.textContent =
+    stages.afterShadowPv > 0 ? `${fmtNum(stages.afterSvfPv, 0)} (-${stages.svfPenaltyPercent.toFixed(1)}%)` : '-';
   dom.pvAfterUhi.textContent =
-    stages.afterShadowPv > 0 ? `${fmtNum(stages.afterUhiPv, 0)} (-${stages.uhiPenaltyPercent.toFixed(1)}%)` : '-';
+    stages.afterSvfPv > 0 ? `${fmtNum(stages.afterUhiPv, 0)} (-${stages.uhiPenaltyPercent.toFixed(1)}%)` : '-';
   dom.pvAfterSoiling.textContent =
     stages.afterUhiPv > 0 ? `${fmtNum(stages.afterSoilingPv, 0)} (-${stages.soilingPenaltyPercent.toFixed(1)}%)` : '-';
   dom.pvNet.textContent =
@@ -252,13 +274,14 @@ function renderResultBox(baselineData, yieldData) {
 
   const pc = yieldData?.penalty_contribution || {};
   const sPct = Number(pc.shadow_contribution_pct);
+  const svPct = Number(pc.svf_contribution_pct);
   const uPct = Number(pc.uhi_contribution_pct);
   const soPct = Number(pc.soiling_contribution_pct);
-  const hasBackendContribution = [sPct, uPct, soPct].every((v) => Number.isFinite(v));
+  const hasBackendContribution = [sPct, svPct, uPct, soPct].every((v) => Number.isFinite(v));
 
   chart.data.datasets[0].data = hasBackendContribution
-    ? [sPct, uPct, soPct]
-    : [stages.shadowContributionPct, stages.uhiContributionPct, stages.soilingContributionPct];
+    ? [sPct, svPct, uPct, soPct]
+    : [stages.shadowContributionPct, stages.svfContributionPct, stages.uhiContributionPct, stages.soilingContributionPct];
   chart.update();
 }
 
@@ -266,13 +289,20 @@ function renderKpis(baselineData, yieldData, temporalWindow) {
   const potential = Number(yieldData.period_yield_kwh ?? 0);
   const days = daysInRange(temporalWindow.start_date, temporalWindow.end_date_exclusive);
   const dailyAvg = potential / days;
-  const peakKw = potential / Math.max(1, days * 5);
-  const co2Kg = potential * 0.82;
+
+  // Estimated installed DC capacity (kWp) = usable roof area * packing factor * module
+  // efficiency at STC (1 kW/m^2). This is the true nameplate the yield is built on -- not
+  // the old "peak power = energy/(days*5h)" heuristic, which was neither a peak nor a capacity.
+  const roofArea = Number(yieldData.roof_area_m2 ?? 0);
+  const packing = Number(yieldData.packing_factor ?? BASE_CONFIG.packing_factor);
+  const panelEff = Number(yieldData.panel_efficiency ?? BASE_CONFIG.panel_efficiency);
+  const capacityKwp = roofArea * packing * panelEff;
+  const co2Kg = potential * GRID_EMISSION_FACTOR;
 
   // "TOTAL ENERGY" should match the PV output (net) shown elsewhere.
   dom.totalEnergy.textContent = fmtNum(potential, 0);
   dom.dailyAvg.textContent = fmtNum(dailyAvg, 1);
-  dom.peakPower.textContent = fmtNum(peakKw, 2);
+  dom.peakPower.textContent = fmtNum(capacityKwp, 2);
   dom.co2Avoided.textContent = fmtNum(co2Kg, 0);
 }
 
@@ -475,6 +505,7 @@ async function showOverlayForLayer(layer) {
       min_height_m: BASE_CONFIG.min_height_m,
       panel_efficiency: BASE_CONFIG.panel_efficiency,
       performance_ratio: BASE_CONFIG.performance_ratio,
+      packing_factor: BASE_CONFIG.packing_factor,
       building_confidence: BASE_CONFIG.building_confidence,
     };
 
@@ -525,6 +556,7 @@ async function runCompute() {
     min_height_m: BASE_CONFIG.min_height_m,
     panel_efficiency: BASE_CONFIG.panel_efficiency,
     performance_ratio: BASE_CONFIG.performance_ratio,
+    packing_factor: BASE_CONFIG.packing_factor,
     building_confidence: BASE_CONFIG.building_confidence,
   };
   state.lastCompute.payloadBase = payloadBase;

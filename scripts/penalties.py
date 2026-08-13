@@ -1,17 +1,18 @@
 """
 Penalty layers applied to the ERA5 baseline irradiance at 4m resolution.
 
-Three independent penalty classes:
-  ShadowPenalty  -- 2.5D building-height shadow model   (Open Buildings raster, 4m)
+Penalty layers:
+  ShadowPenalty  -- 2.5D building-height shadow model, blocks direct beam (Open Buildings raster, 4m)
+  SkyViewFactor  -- 2.5D building-height sky occlusion, blocks diffuse    (Open Buildings raster, 4m)
   UHIPenalty     -- Temperature derate from UHI effect  (MODIS LST, 1km)
   SoilingPenalty -- Dust/soiling derate from MODIS MAIAC AOD (1km, 550nm)
 
-Combined net energy formula:
+Combined net energy formula (see net_irradiance_image):
   E_net = GHI_period
-          * shadow_retention_fraction   [ShadowPenalty,  per-pixel EE image, 0-1]
+          * [ diffuse_fraction * SVF + beam_fraction * (1 - shadow_frequency) ]  [Shadow + SkyViewFactor]
           * uhi_derate_factor           [UHIPenalty,     scalar ~0.97-1.00]
           * soiling_retention_factor    [SoilingPenalty, scalar ~0.94-1.00]
-          * panel_efficiency * PR * roof_area_m2
+          * panel_efficiency * PR * packing_factor * roof_area_m2
 
 Research basis:
   Shadow  : 2.5D geometric shadow casting. Known approximations documented in
@@ -204,39 +205,83 @@ class ShadowPenalty:
             result = result.add(img)
         return result.rename("shadow_frequency")
 
-    @staticmethod
-    def retention(
-        building_height: ee.Image,
-        solar_positions: Optional[List[Tuple]] = None,
-        pixel_size_m: float = 4.0,
-    ) -> ee.Image:
-        """
-        Irradiance retention after shadow penalty [0, 1]. Band: shadow_retention.
-        retention = 1 - shadow_frequency.
-        """
-        return (
-            ee.Image(1.0)
-            .subtract(ShadowPenalty.frequency(building_height, solar_positions, pixel_size_m))
-            .rename("shadow_retention")
-        )
+
+# ---------------------------------------------------------------------------
+# Class 1b – SkyViewFactor  (diffuse counterpart of ShadowPenalty)
+# ---------------------------------------------------------------------------
+
+class SkyViewFactor:
+    """
+    Planar (cosine-weighted) Sky View Factor from the 2.5D building-height raster.
+
+    Where ShadowPenalty removes the DIRECT beam blocked by buildings, this layer
+    removes the DIFFUSE light blocked by buildings: surrounding structures occlude
+    part of the sky hemisphere, so a rooftop receives less than the full diffuse
+    irradiance that an open horizontal surface would.
+
+    For a horizontal rooftop pixel, the fraction of isotropic diffuse sky radiation
+    that is still received:
+
+        SVF = 1 - mean_over_azimuth( sin^2( horizon_elevation_angle ) )
+
+        horizon_elevation_angle(azimuth) = max over distance d of
+            atan( (H_neighbour(d) - H_self) / d )      [>= 0; only taller neighbours block]
+
+    The sin^2 weighting is the standard planar-surface isotropic-diffuse form (Oke,
+    *Boundary Layer Climates*): an obstruction rising to elevation beta in an azimuth
+    sector blocks a fraction sin^2(beta) of the diffuse flux a horizontal surface
+    would otherwise receive from that sector. Integrating over azimuth and normalising
+    gives 1 - mean(sin^2(beta)).
+
+    Rooftop pixels sit at (or near) the top of their own building, so self-height is
+    subtracted and SVF is typically high (~0.85-1.0); only genuinely TALLER neighbours
+    reduce it. Deep street canyons would be much lower, but roof-candidate pixels are
+    by definition above the canyon.
+
+    Combined with the beam/shadow term the net retention becomes:
+        retention = diffuse_fraction * SVF + beam_fraction * (1 - shadow_frequency)
+    """
+
+    N_AZIMUTH: int = 8
+    # Sample radii in pixels; * pixel_size_m = metres. Log-spaced: near obstructions
+    # dominate the horizon angle, distant ones subtend a small angle and matter less.
+    DIST_PX: Tuple[int, ...] = (1, 2, 4, 8, 16)
 
     @staticmethod
-    def stats(
-        aoi: ee.Geometry,
+    def image(
         building_height: ee.Image,
-        solar_positions: Optional[List[Tuple]] = None,
-        scale_m: float = 4.0,
-    ) -> Dict[str, Any]:
-        """Aggregate mean shadow stats over AOI. Calls getInfo; returns plain dict."""
-        ret_img = ShadowPenalty.retention(building_height, solar_positions, scale_m)
-        mean_ret = _reduce_mean(ret_img, "shadow_retention", aoi, scale_m)
-        positions = solar_positions or ShadowPenalty._DELHI_POSITIONS
-        return {
-            "mean_shadow_retention": mean_ret,
-            "mean_shadow_frequency": round(1.0 - mean_ret, 4) if mean_ret is not None else None,
-            "n_solar_positions": len(positions),
-            "reduce_scale_m": scale_m,
-        }
+        pixel_size_m: float = 4.0,
+        n_azimuth: Optional[int] = None,
+        dist_px: Optional[Tuple[int, ...]] = None,
+    ) -> ee.Image:
+        """Per-pixel Sky View Factor [0, 1]. Band: sky_view_factor."""
+        n_az = int(n_azimuth or SkyViewFactor.N_AZIMUTH)
+        dists = dist_px or SkyViewFactor.DIST_PX
+
+        sin2_terms: List[ee.Image] = []
+        for k in range(n_az):
+            az = 2.0 * math.pi * k / n_az
+            ux, uy = math.sin(az), math.cos(az)
+
+            # Horizon elevation angle in this azimuth = max over sampled distances.
+            angle_imgs: List[ee.Image] = []
+            for d in dists:
+                dm = float(d) * pixel_size_m
+                neighbour = building_height.translate(ux * d, uy * d)
+                rise = neighbour.subtract(building_height).max(0.0)   # taller neighbours only
+                angle_imgs.append(rise.divide(dm).atan())             # radians, >= 0
+            horizon = angle_imgs[0]
+            for a in angle_imgs[1:]:
+                horizon = horizon.max(a)
+
+            sin2_terms.append(horizon.sin().pow(2))
+
+        acc = sin2_terms[0]
+        for t in sin2_terms[1:]:
+            acc = acc.add(t)
+        mean_sin2 = acc.divide(n_az)
+
+        return ee.Image(1.0).subtract(mean_sin2).clamp(0.0, 1.0).rename("sky_view_factor")
 
 
 # ---------------------------------------------------------------------------
@@ -271,9 +316,11 @@ class UHIPenalty:
     UHI estimation (MODIS LST):
       1. Annual median of MODIS MOD11A2 daytime LST (1 km) over the AOI.
          Raw integer values * 0.02 = Kelvin; subtract 273.15 for degC.
-      2. Compute 20 km focal_mean of the LST image as the regional background.
-         (20 px at 1 km/px ~ 20 km; enough to span urban-rural gradient in
-          most Indian cities; larger cities like Delhi/Mumbai may need 25-30 km.)
+      2. Compute 30 km focal_mean of the LST image as the regional background.
+         (30 px at 1 km/px ~ 30 km; sized to reach beyond the built-up core of
+          large polynuclear cities like Delhi/Mumbai, where a smaller kernel
+          stays entirely inside the urban heat footprint and drives the
+          urban-minus-background anomaly artificially toward zero.)
       3. delta_T_UHI = AOI mean LST - background mean at AOI location.
 
     Note: UHI is a quasi-static location property; we use the full calendar year
@@ -284,7 +331,7 @@ class UHIPenalty:
     LST_DAY_BAND = "LST_Day_1km"
     LST_SCALE = 0.02          # raw integer * 0.02 = Kelvin (MODIS scale factor)
     K_TO_C_OFFSET = 273.15
-    BACKGROUND_KERNEL_PX = 20  # 20 km at 1 km/pixel
+    BACKGROUND_KERNEL_PX = 30  # 30 km at 1 km/pixel (large-city UHI footprint; see class docstring)
     DEFAULT_TEMP_COEFF = -0.004  # /degC, crystalline silicon (IEC 60891)
 
     @classmethod
@@ -330,7 +377,7 @@ class UHIPenalty:
         year = int(start_date[:4])
         lst = cls._lst_celsius(aoi, year)
 
-        # 20 km focal mean as rural/background reference
+        # 30 km focal mean as rural/background reference
         background = lst.focal_mean(
             radius=cls.BACKGROUND_KERNEL_PX,
             kernelType="circle",
@@ -497,22 +544,8 @@ class SoilingPenalty:
 
 
 # ---------------------------------------------------------------------------
-# Module-level shims: backward-compatible API for main.py and tests
+# Combined net-irradiance builder (used by /api/yield and /api/tiles)
 # ---------------------------------------------------------------------------
-
-DELHI_SOLAR_POSITIONS_WEIGHTED: List[Tuple[float, float, float]] = (
-    ShadowPenalty._DELHI_POSITIONS
-)
-
-
-def shadow_retention_fraction(
-    building_height: ee.Image,
-    solar_positions: Optional[List[Tuple]] = None,
-    pixel_size_m: float = 4.0,
-) -> ee.Image:
-    """Retained irradiance fraction [0,1] after shadow penalty. Band: shadow_retention."""
-    return ShadowPenalty.retention(building_height, solar_positions, pixel_size_m)
-
 
 def net_irradiance_image(
     baseline_kwh_m2_period: float,
@@ -520,19 +553,25 @@ def net_irradiance_image(
     beam_fraction: float = 1.0,
     uhi_derate: float = 1.0,
     soiling_retention: float = 1.0,
+    sky_view_factor: Optional[Any] = None,
 ) -> ee.Image:
     """
     Per-pixel net irradiance after all penalty layers with beam/diffuse correction.
 
-    Corrected formula (replaces naive GHI * shadow_retention):
-      net = GHI * (1 - shadow_frequency * beam_fraction) * uhi_derate * soiling_retention
+    Formula:
+      net = GHI * [ diffuse_fraction * SVF + beam_fraction * (1 - shadow_frequency) ]
+                * uhi_derate * soiling_retention
 
     Derivation:
       GHI = DHI + DNI_h  (diffuse + direct horizontal)
-      Shadows block only DNI_h (beam); DHI reaches rooftops from open sky.
-        net = DHI + DNI_h * (1 - shadow_frequency)
-            = GHI * diffuse_fraction + GHI * beam_fraction * (1 - shadow_frequency)
-            = GHI * (1 - shadow_frequency * beam_fraction)
+      Shadows block only the beam (DNI_h); the diffuse (DHI) reaches the rooftop from
+      the visible sky, whose fraction is the Sky View Factor (SVF).
+        net = DHI * SVF + DNI_h * (1 - shadow_frequency)
+            = GHI * diffuse_fraction * SVF + GHI * beam_fraction * (1 - shadow_frequency)
+
+    With SVF = 1 (open sky) this collapses to the previous beam-only correction
+    GHI * (1 - shadow_frequency * beam_fraction), so callers that omit sky_view_factor
+    are unaffected.
 
     Parameters
     ----------
@@ -549,63 +588,24 @@ def net_irradiance_image(
         Scalar from UHIPenalty.stats()['uhi_derate_factor'].
     soiling_retention : float
         Scalar from SoilingPenalty.stats()['soiling_retention_factor'].
+    sky_view_factor : ee.Image | float | None
+        Per-pixel Sky View Factor [0, 1] from SkyViewFactor.image(), a scalar, or
+        None. None (or 1.0) means an unobstructed sky -> full diffuse received.
 
     Returns ee.Image band 'net_irradiance_kwh_m2_period'.
     """
-    corrected_retention = ee.Image(1.0).subtract(shadow_frequency.multiply(beam_fraction))
+    diffuse_fraction = 1.0 - beam_fraction
+
+    if sky_view_factor is None:
+        svf = ee.Image(1.0)
+    elif isinstance(sky_view_factor, (int, float)):
+        svf = ee.Image(float(sky_view_factor))
+    else:
+        svf = sky_view_factor
+
+    beam_retention = ee.Image(1.0).subtract(shadow_frequency).multiply(beam_fraction)
+    diffuse_retention = svf.multiply(diffuse_fraction)
+    corrected_retention = diffuse_retention.add(beam_retention)
+
     effective_baseline = baseline_kwh_m2_period * uhi_derate * soiling_retention
     return corrected_retention.multiply(effective_baseline).rename("net_irradiance_kwh_m2_period")
-
-
-def per_building_yield(
-    net_irradiance: ee.Image,
-    roof_mask: ee.Image,
-    aoi: ee.Geometry,
-    buildings_fc: ee.FeatureCollection,
-    panel_efficiency: float = 0.18,
-    performance_ratio: float = 0.80,
-    scale_m: float = 4.0,
-) -> ee.FeatureCollection:
-    """PV yield per building polygon (kWh/period). Adds period_yield_kwh to each feature."""
-    energy_img = (
-        net_irradiance
-        .multiply(roof_mask.toFloat())
-        .multiply(ee.Image.pixelArea())
-        .rename("energy_kwh_pixel")
-    )
-
-    def _add(feature: ee.Feature) -> ee.Feature:
-        g = feature.geometry()
-        total = ee.Number(
-            energy_img
-            .reduceRegion(ee.Reducer.sum(), g, scale_m, maxPixels=1e7)
-            .get("energy_kwh_pixel")
-        ).multiply(panel_efficiency * performance_ratio)
-        roof_area = (
-            roof_mask.toFloat()
-            .multiply(ee.Image.pixelArea())
-            .reduceRegion(ee.Reducer.sum(), g, scale_m, maxPixels=1e7)
-            .get("roof_candidate")
-        )
-        irr_mean = (
-            net_irradiance
-            .reduceRegion(ee.Reducer.mean(), g, scale_m, maxPixels=1e7)
-            .get("net_irradiance_kwh_m2_period")
-        )
-        return feature.set({
-            "roof_area_m2": roof_area,
-            "net_irradiance_kwh_m2_period": irr_mean,
-            "period_yield_kwh": total,
-        })
-
-    return buildings_fc.filterBounds(aoi).map(_add)
-
-
-def get_shadow_stats(
-    aoi: ee.Geometry,
-    building_height: ee.Image,
-    solar_positions: Optional[List[Tuple]] = None,
-    scale_m: float = 4.0,
-) -> Dict[str, Any]:
-    """Aggregate shadow stats dict (calls getInfo). Delegates to ShadowPenalty.stats."""
-    return ShadowPenalty.stats(aoi, building_height, solar_positions, scale_m)

@@ -14,8 +14,6 @@ CATALOG = {
     "fabdem": "projects/sat-io/open-datasets/FABDEM",
     "open_buildings_temporal": "GOOGLE/Research/open-buildings-temporal/v1",
     "open_buildings_vector": "GOOGLE/Research/open-buildings/v3/polygons",
-    "sentinel2_sr": "COPERNICUS/S2_SR_HARMONIZED",
-    "modis_lst": "MODIS/061/MOD11A2",
 }
 
 
@@ -68,68 +66,3 @@ def get_open_buildings_vector(
         .filterBounds(aoi)
         .filter(ee.Filter.gte("confidence", confidence_threshold))
     )
-
-
-def get_sentinel2_composite(
-    aoi: ee.Geometry,
-    start_date: str,
-    end_date: str,
-) -> ee.Image:
-    """
-    Cloud-masked (QA60) median Sentinel-2 L2A composite clipped to aoi.
-    Returns multiband surface reflectance for DBSI/NDVI computation.
-    """
-    def _mask(img: ee.Image) -> ee.Image:
-        qa = img.select("QA60")
-        return img.updateMask(
-            qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
-        )
-    return (
-        ee.ImageCollection(CATALOG["sentinel2_sr"])
-        .filterBounds(aoi)
-        .filterDate(start_date, end_date)
-        .map(_mask)
-        .median()
-        .clip(aoi)
-    )
-
-
-def get_modis_lst_composite(
-    aoi: ee.Geometry,
-    start_date: str,
-    end_date: str,
-    use_night: bool = True,
-) -> ee.Image:
-    """
-    Median MODIS MOD11A2 Land Surface Temperature in Kelvin (scale 0.02).
-    Convert to degC: (LST * 0.02) - 273.15.
-    use_night=True (default) uses LST_Night_1km, else LST_Day_1km.
-    """
-    band = "LST_Night_1km" if use_night else "LST_Day_1km"
-    return (
-        ee.ImageCollection(CATALOG["modis_lst"])
-        .filterBounds(aoi)
-        .filterDate(start_date, end_date)
-        .select(band)
-        .median()
-        .clip(aoi)
-        .rename("LST")
-    )
-
-
-def get_available_datasets() -> dict:
-    """Dataset catalog metadata (IDs and purpose)."""
-    return {
-        "srtm_dem": {"id": CATALOG["srtm_dem"], "purpose": "30m global DEM"},
-        "fabdem": {"id": CATALOG["fabdem"], "purpose": "30m bare-earth DEM, buildings/forest removed"},
-        "open_buildings_temporal": {
-            "id": CATALOG["open_buildings_temporal"],
-            "purpose": "Building presence, height, fractional count; ~4m; 2016-2023",
-        },
-        "open_buildings_vector": {
-            "id": CATALOG["open_buildings_vector"],
-            "purpose": "Individual building footprint polygons with confidence scores",
-        },
-        "sentinel2_sr": {"id": CATALOG["sentinel2_sr"], "purpose": "Surface reflectance for DBSI, NDVI"},
-        "modis_lst": {"id": CATALOG["modis_lst"], "purpose": "8-day LST for UHI (day/night)"},
-    }

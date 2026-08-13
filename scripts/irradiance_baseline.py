@@ -122,15 +122,6 @@ def get_era5_baseline_info(
 # Public: arbitrary date-range baseline
 # ---------------------------------------------------------------------------
 
-def era5_total_ghi_kwh_m2_for_range(
-    aoi: ee.Geometry,
-    start_date: str,
-    end_date_exclusive: str,
-) -> ee.Image:
-    """Total GHI (kWh/m^2) over [start_date, end_date_exclusive). Band: total_GHI_kWh_m2."""
-    return _era5_total(start_date, end_date_exclusive)
-
-
 def get_era5_range_info(
     aoi: ee.Geometry,
     start_date: str,
