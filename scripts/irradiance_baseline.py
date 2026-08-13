@@ -313,6 +313,68 @@ def sample_era5_beam_fraction_at_point(
 
 
 # ---------------------------------------------------------------------------
+# Multi-window point sampling (batched: one getInfo for many sub-periods)
+# Used by /api/series to avoid one ERA5 request per curve point.
+# ---------------------------------------------------------------------------
+
+def sample_era5_period_ghi_multi(
+    point: ee.Geometry,
+    windows: list,
+    scale_m: float = ERA5_SCALE_M,
+) -> list:
+    """
+    Period-integrated GHI (kWh/m^2) at a point for many sub-windows in ONE getInfo.
+
+    windows : list of (start_date, end_date_exclusive) ISO strings.
+    Returns a list of floats aligned to `windows` (0.0 where the sample is missing).
+    Each window's total is identical to sample_era5_period_ghi_kwh_m2_at_point().
+    """
+    if not windows:
+        return []
+    img: Optional[ee.Image] = None
+    for i, (s, e) in enumerate(windows):
+        band = _era5_total(s, e).rename(f"ghi_{i}")
+        img = band if img is None else img.addBands(band)
+    feat = img.sample(region=point, scale=scale_m, numPixels=1, geometries=False).first().getInfo()
+    props = (feat or {}).get("properties", {}) if feat else {}
+    return [float(props.get(f"ghi_{i}") or 0.0) for i in range(len(windows))]
+
+
+def sample_era5_beam_multi(
+    point: ee.Geometry,
+    windows: list,
+    scale_m: float = _ERA5_HOURLY_SCALE_M,
+) -> list:
+    """
+    Beam fraction (direct / GHI) at a point for many sub-windows in ONE getInfo.
+
+    windows : list of (start_date, end_date_exclusive) ISO strings.
+    Returns a list of beam fractions aligned to `windows`; uses the same 0.60
+    fallback as sample_era5_beam_fraction_at_point() where data is unavailable.
+    """
+    if not windows:
+        return []
+    img: Optional[ee.Image] = None
+    for i, (s, e) in enumerate(windows):
+        col = ee.ImageCollection(_ERA5_HOURLY_COLLECTION).filterDate(s, e)
+        d = col.select(_ERA5_HOURLY_DIRECT_BAND).sum().rename(f"d_{i}")
+        g = col.select(_ERA5_HOURLY_GHI_BAND).sum().rename(f"g_{i}")
+        pair = d.addBands(g)
+        img = pair if img is None else img.addBands(pair)
+    feat = img.sample(region=point, scale=scale_m, numPixels=1, geometries=False).first().getInfo()
+    props = (feat or {}).get("properties", {}) if feat else {}
+    out = []
+    for i in range(len(windows)):
+        gg = props.get(f"g_{i}")
+        dd = props.get(f"d_{i}")
+        if gg is not None and dd is not None and float(gg) > 0:
+            out.append(min(float(dd) / float(gg), 1.0))
+        else:
+            out.append(0.60)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
 import ee
@@ -14,7 +14,10 @@ from scripts.utility import SolarMappingUtils
 from scripts.irradiance_baseline import (
     sample_era5_period_ghi_kwh_m2_at_point,
     sample_era5_beam_fraction_at_point,
+    sample_era5_period_ghi_multi,
+    sample_era5_beam_multi,
     ERA5_SCALE_M,
+    _ERA5_HOURLY_SCALE_M,
 )
 from scripts.penalties import (
     net_irradiance_image,
@@ -26,7 +29,7 @@ from scripts.solar_geometry import (
     solar_positions_monthly,
     solar_positions_single_day,
 )
-from scripts.datasets import get_open_buildings_temporal, get_open_buildings_vector
+from scripts.datasets import get_dem, get_open_buildings_temporal, get_open_buildings_vector
 from scripts.rooftops import build_rooftop_candidate_mask, apply_terrain_exclusion
 
 
@@ -394,16 +397,6 @@ class BuildingsRequest(BaseModel):
     limit: int = 400
 
 
-class UrbanMetricsRequest(BaseModel):
-    project_id: Optional[str] = Field(default_factory=lambda: os.environ.get("GEE_PROJECT_ID", "pv-mapping-india"))
-    coordinates: Optional[List[List[float]]] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    half_size_deg: float = 0.01
-    building_confidence: float = 0.7
-    limit: int = 400
-
-
 def _aoi_from_req(req: Any) -> Tuple[List[List[float]], ee.Geometry]:
     if getattr(req, "coordinates", None) is None:
         if getattr(req, "lat", None) is None or getattr(req, "lon", None) is None:
@@ -412,6 +405,98 @@ def _aoi_from_req(req: Any) -> Tuple[List[List[float]], ee.Geometry]:
     else:
         coords = req.coordinates
     return coords, ee.Geometry.Polygon(coords)
+
+
+_EE_INIT_PROJECT: Optional[str] = None
+
+
+def _ensure_ee(project_id: str) -> None:
+    """
+    Initialize Earth Engine once per process (re-init only if the project changes).
+    Avoids a redundant ee.Initialize round-trip on every request.
+    """
+    global _EE_INIT_PROJECT
+    if _EE_INIT_PROJECT != project_id:
+        ee.Initialize(project=project_id)
+        _EE_INIT_PROJECT = project_id
+
+
+def _build_roof_layers(
+    aoi: ee.Geometry,
+    roof_year: Optional[int],
+    presence_threshold: float,
+    min_height_m: float,
+) -> Tuple[ee.Image, ee.Image, ee.Image]:
+    """
+    Shared rooftop-layer construction for /api/yield, /api/tiles and /api/series.
+    Returns (buildings_raster, building_height, roof_mask) with terrain exclusion applied.
+    """
+    buildings_raster = get_open_buildings_temporal(aoi, year=roof_year)
+    building_height = (
+        buildings_raster
+        .select("building_height")
+        .setDefaultProjection(crs="EPSG:4326", scale=4)
+    )
+    roof_mask = build_rooftop_candidate_mask(
+        buildings_raster,
+        presence_threshold=presence_threshold,
+        min_height_m=min_height_m,
+    )
+    exclusion = ee.Terrain.products(get_dem(aoi, "srtm")).select("slope").lt(30)
+    roof_mask = apply_terrain_exclusion(roof_mask, exclusion, buildings_raster, scale_m=4.0)
+    return buildings_raster, building_height, roof_mask
+
+
+def _select_target_building(
+    aoi: ee.Geometry,
+    coords: List[List[float]],
+    centroid: ee.Geometry,
+    confidence: float,
+) -> Tuple[ee.Geometry, Dict[str, Any], Dict[str, Any], str, Optional[str]]:
+    """
+    Pick the Open Buildings polygon at the AOI centroid, with buffer + AOI fallbacks.
+    Returns (building_geom, building_props, building_geojson_feature, source, warning).
+    """
+    tb = (
+        get_open_buildings_vector(aoi, confidence_threshold=confidence)
+        .filterBounds(centroid)
+        .first()
+        .getInfo()
+    )
+    source = "vector_centroid_point"
+    warning: Optional[str] = None
+
+    # A point on a polygon edge (or a low-confidence building) can yield empty;
+    # retry with a small buffer, then fall back to the AOI roof mask.
+    if tb is None:
+        try:
+            tb = (
+                get_open_buildings_vector(aoi, confidence_threshold=confidence)
+                .filterBounds(centroid.buffer(30))
+                .first()
+                .getInfo()
+            )
+            if tb is not None:
+                source = "vector_centroid_buffer30m"
+        except Exception:
+            tb = None
+
+    if tb is None:
+        source = "aoi_fallback"
+        warning = "No Open Buildings polygon found at the selected point; using the AOI roof mask for calculations."
+        building_geom = aoi
+        building_props = {"confidence": confidence, "area_in_meters": None}
+        building_geojson_feature = {
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [coords]},
+            "properties": {},
+        }
+    else:
+        building_geom = ee.Feature(tb).geometry()
+        building_props = tb.get("properties", {})
+        building_geojson_feature = tb
+
+    return building_geom, building_props, building_geojson_feature, source, warning
 
 
 def _ee_tile_template(image: ee.Image, vis: Dict[str, Any]) -> str:
@@ -448,27 +533,15 @@ def tiles(req: TilesRequest) -> Dict[str, Any]:
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex))
 
-        ee.Initialize(project=req.project_id)
+        _ensure_ee(req.project_id)
         coords, aoi = _aoi_from_req(req)
         centroid = aoi.centroid(1)
         lon_deg, lat_deg = _centroid_lon_lat(centroid)
         s, e = win["start_date"], win["end_date_exclusive"]
 
-        buildings_raster = get_open_buildings_temporal(aoi, year=req.roof_year)
-        building_height = (
-            buildings_raster
-            .select("building_height")
-            .setDefaultProjection(crs="EPSG:4326", scale=4)
+        _, building_height, roof_mask = _build_roof_layers(
+            aoi, req.roof_year, req.presence_threshold, req.min_height_m
         )
-
-        roof_mask = build_rooftop_candidate_mask(
-            buildings_raster,
-            presence_threshold=req.presence_threshold,
-            min_height_m=req.min_height_m,
-        )
-        dem = ee.Image("USGS/SRTMGL1_003").select("elevation").clip(aoi)
-        exclusion = ee.Terrain.products(dem).select("slope").lt(30)
-        roof_mask = apply_terrain_exclusion(roof_mask, exclusion, buildings_raster, scale_m=4.0)
 
         solar_positions = _solar_positions_for_window(lat_deg, lon_deg, win)
         shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=solar_positions)
@@ -564,7 +637,7 @@ def buildings(req: BuildingsRequest) -> Dict[str, Any]:
     Intended for map rendering / selection (open-data-only).
     """
     try:
-        ee.Initialize(project=req.project_id)
+        _ensure_ee(req.project_id)
         coords, aoi = _aoi_from_req(req)
         fc = get_open_buildings_vector(aoi, confidence_threshold=req.building_confidence).limit(req.limit)
         gj = fc.getInfo()
@@ -596,96 +669,6 @@ def buildings(req: BuildingsRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _centroid_from_polygon_coords(coords: Any) -> Optional[Tuple[float, float]]:
-    """
-    Very lightweight centroid for GeoJSON Polygon coordinates.
-    Returns (lon, lat) or None.
-    """
-    try:
-        ring = coords[0]
-        n = max(0, len(ring) - 1)
-        if n <= 0:
-            return None
-        sx = sum(p[0] for p in ring[:n])
-        sy = sum(p[1] for p in ring[:n])
-        return (sx / n, sy / n)
-    except Exception:
-        return None
-
-
-@app.post("/api/urban_metrics")
-def urban_metrics(req: UrbanMetricsRequest) -> Dict[str, Any]:
-    """
-    Open-data AOI context metrics for the dashboard.
-    If PySAL is installed, this endpoint can be extended to compute spatial statistics;
-    for now we return robust summaries without extra dependencies.
-    """
-    try:
-        ee.Initialize(project=req.project_id)
-        coords, aoi = _aoi_from_req(req)
-        aoi_area_km2 = float(aoi.area(1).divide(1e6).getInfo())
-
-        fc = get_open_buildings_vector(aoi, confidence_threshold=req.building_confidence).limit(req.limit)
-        gj = fc.getInfo() or {}
-        feats = gj.get("features", []) or []
-
-        areas = []
-        centroids = []
-        for f in feats:
-            p = (f.get("properties") or {})
-            a = p.get("area_in_meters")
-            if a is not None:
-                try:
-                    areas.append(float(a))
-                except Exception:
-                    pass
-            g = (f.get("geometry") or {})
-            if g.get("type") == "Polygon":
-                c = _centroid_from_polygon_coords(g.get("coordinates"))
-                if c is not None:
-                    centroids.append(c)
-
-        building_count = len(feats)
-        total_area_m2 = float(sum(areas)) if areas else 0.0
-        mean_area_m2 = float(total_area_m2 / len(areas)) if areas else 0.0
-        areas_sorted = sorted(areas)
-        median_area_m2 = float(areas_sorted[len(areas_sorted) // 2]) if areas_sorted else 0.0
-
-        density_buildings_km2 = (building_count / aoi_area_km2) if aoi_area_km2 > 0 else None
-        footprint_coverage_pct = (total_area_m2 / (aoi_area_km2 * 1e6) * 100.0) if aoi_area_km2 > 0 else None
-
-        # PySAL is optional; detect availability and return capability flags.
-        try:
-            import libpysal  # type: ignore
-            import esda  # type: ignore
-            pysal_available = True
-        except Exception:
-            pysal_available = False
-
-        return {
-            "status": "ok",
-            "aoi_coordinates": coords,
-            "aoi_area_km2": aoi_area_km2,
-            "building_confidence": req.building_confidence,
-            "limit": req.limit,
-            "open_buildings_count": building_count,
-            "footprint_total_area_m2": total_area_m2,
-            "footprint_mean_area_m2": mean_area_m2,
-            "footprint_median_area_m2": median_area_m2,
-            "buildings_density_per_km2": density_buildings_km2,
-            "footprint_coverage_pct": footprint_coverage_pct,
-            "pysal_available": pysal_available,
-            "notes": (
-                "Spatial statistics (e.g. Moran's I) can be added when PySAL is installed. "
-                "Current metrics are computed from Open Buildings polygons only."
-            ),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/yield")
 def compute_yield(req: YieldRequest) -> Dict[str, Any]:
     """
@@ -695,13 +678,6 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
     Shadow retention uses sun positions aligned with that window (year / quarter / day)
     at the centroid latitude and longitude.
     """
-    if req.coordinates is None:
-        if req.lat is None or req.lon is None:
-            raise HTTPException(status_code=400, detail="Provide either coordinates or lat/lon.")
-        coords = square_aoi_from_point(req.lat, req.lon, req.half_size_deg)
-    else:
-        coords = req.coordinates
-
     try:
         try:
             win = resolve_temporal_window(
@@ -715,8 +691,8 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex))
 
-        ee.Initialize(project=req.project_id)
-        aoi = ee.Geometry.Polygon(coords)
+        _ensure_ee(req.project_id)
+        coords, aoi = _aoi_from_req(req)
         centroid = aoi.centroid(1)
         lon_deg, lat_deg = _centroid_lon_lat(centroid)
         s, e = win["start_date"], win["end_date_exclusive"]
@@ -728,20 +704,9 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
 
         solar_positions = _solar_positions_for_window(lat_deg, lon_deg, win)
 
-        buildings_raster = get_open_buildings_temporal(aoi, year=req.roof_year)
-        building_height = (
-            buildings_raster
-            .select("building_height")
-            .setDefaultProjection(crs="EPSG:4326", scale=4)
+        _, building_height, roof_mask = _build_roof_layers(
+            aoi, req.roof_year, req.presence_threshold, req.min_height_m
         )
-        roof_mask = build_rooftop_candidate_mask(
-            buildings_raster,
-            presence_threshold=req.presence_threshold,
-            min_height_m=req.min_height_m,
-        )
-        dem = ee.Image("USGS/SRTMGL1_003").select("elevation").clip(aoi)
-        exclusion = ee.Terrain.products(dem).select("slope").lt(30)
-        roof_mask = apply_terrain_exclusion(roof_mask, exclusion, buildings_raster, scale_m=4.0)
 
         # Shadow frequency (per-pixel, insolation-weighted, data-driven from building heights)
         shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=solar_positions)
@@ -769,159 +734,69 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             sky_view_factor=svf_img,
         )
 
-        target_building = (
-            get_open_buildings_vector(aoi, confidence_threshold=req.building_confidence)
-            .filterBounds(centroid)
-            .first()
-            .getInfo()
-        )
-
         period_label = {"yearly": "calendar_year", "quarterly": "calendar_quarter", "monthly": "calendar_month", "daily": "single_day"}[win["mode"]]
-        building_selection_source = "vector_centroid_point"
-        selection_warning: Optional[str] = None
-
-        # When the selected point falls near a polygon edge (or the selected building has low confidence),
-        # `filterBounds(centroid)` can return empty. This is a UI "non-functional" failure mode.
-        # We fix it by trying a small buffer around the centroid, and finally falling back to the AOI.
-        if target_building is None:
-            try:
-                # 30 meters buffer in geodesic coordinates (EE handles this in metres for lon/lat points).
-                target_building = (
-                    get_open_buildings_vector(aoi, confidence_threshold=req.building_confidence)
-                    .filterBounds(centroid.buffer(30))
-                    .first()
-                    .getInfo()
-                )
-                building_selection_source = "vector_centroid_buffer30m" if target_building is not None else building_selection_source
-            except Exception:
-                # Fall through to AOI fallback
-                target_building = None
-
-        if target_building is None:
-            building_selection_source = "aoi_fallback"
-            selection_warning = (
-                "No Open Buildings polygon found at the selected point; using the AOI roof mask for calculations."
-            )
-            building_geom = aoi
-            building_props = {
-                "confidence": req.building_confidence,
-                "area_in_meters": None,
-            }
-            aoi_ring = coords  # square_aoi_from_point already returns a closed ring
-            building_geojson_feature = {
-                "type": "Feature",
-                "geometry": {"type": "Polygon", "coordinates": [aoi_ring]},
-                "properties": {},
-            }
-        else:
-            building_geom = ee.Feature(target_building).geometry()
-            building_props = target_building.get("properties", {})
-            building_geojson_feature = target_building
-
-        energy_img = (
-            net_irr
-            .multiply(roof_mask.toFloat())
-            .multiply(ee.Image.pixelArea())
-            .rename("energy_kwh_pixel")
-        )
-        stats = energy_img.reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=building_geom,
-            scale=4.0,
-            maxPixels=1e7,
-        ).getInfo()
-
-        roof_area_stats = (
-            roof_mask.toFloat()
-            .multiply(ee.Image.pixelArea())
-            .reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=building_geom,
-                scale=4.0,
-                maxPixels=1e7,
-            )
-            .getInfo()
-        )
-
-        shadow_stats = (
-            shadow_freq
-            .reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=building_geom,
-                scale=4.0,
-                maxPixels=1e7,
-            )
-            .getInfo()
-        )
-
-        roof_area_m2 = roof_area_stats.get("roof_candidate") or 0.0
-        mean_shadow_frequency = shadow_stats.get("shadow_frequency")
-        mean_shadow_fraction = mean_shadow_frequency  # shadow_freq IS the fraction in shadow
+        (
+            building_geom,
+            building_props,
+            building_geojson_feature,
+            building_selection_source,
+            selection_warning,
+        ) = _select_target_building(aoi, coords, centroid, req.building_confidence)
 
         # ------------------------------------------------------------------
-        # Stage-wise yields (authoritative, computed on the SAME geometry)
-        #
-        # We must NOT mix AOI-level baselines (/api/baseline) with building-level
-        # net yield (/api/yield), otherwise loss% becomes misleading.
-        #
-        # All values below are PV output (kWh) and are directly comparable:
-        #   baseline_yield_kwh          : no penalties (GHI * roof_area * eff * PR)
-        #   after_shadow_yield_kwh      : apply shadow (beam blocking) only
-        #   after_svf_yield_kwh         : shadow + sky-view (diffuse blocking)
-        #   after_uhi_yield_kwh         : shadow + svf + uhi
-        #   after_soiling_yield_kwh     : shadow + svf + uhi + soiling  (== net)
+        # Stage irradiance images (per-pixel kWh/m^2 for the period), all on the
+        # SAME building geometry so stage losses are directly comparable:
+        #   baseline : GHI, no penalties
+        #   shadow   : beam blocking only (SVF = 1, diffuse fully received)
+        #   svf      : shadow + diffuse occlusion (Sky View Factor)
+        #   uhi      : shadow + svf + uhi
+        #   net      : shadow + svf + uhi + soiling  (== net_irr, already built)
         # ------------------------------------------------------------------
-
-        def _sum_kwh(img_kwh_m2: ee.Image, band: str) -> float:
-            sraw = (
-                img_kwh_m2
-                .multiply(roof_mask.toFloat())
-                .multiply(ee.Image.pixelArea())
-                .rename("kwh_pixel")
-                .reduceRegion(
-                    reducer=ee.Reducer.sum(),
-                    geometry=building_geom,
-                    scale=4.0,
-                    maxPixels=1e7,
-                )
-                .getInfo()
-            )
-            return float((sraw or {}).get("kwh_pixel") or 0.0)
-
-        baseline_irr = ee.Image.constant(regional_ghi_kwh_m2_period).rename("baseline_ghi_kwh_m2_period")
-        # after_shadow: beam blocking only, diffuse still fully received (SVF = 1)
+        baseline_irr = ee.Image.constant(regional_ghi_kwh_m2_period).rename("baseline")
         shadow_only_irr = net_irradiance_image(
-            regional_ghi_kwh_m2_period,
-            shadow_freq,
-            beam_fraction=beam_fraction,
-            uhi_derate=1.0,
-            soiling_retention=1.0,
-            sky_view_factor=None,
+            regional_ghi_kwh_m2_period, shadow_freq, beam_fraction=beam_fraction,
+            uhi_derate=1.0, soiling_retention=1.0, sky_view_factor=None,
         )
-        # after_svf: shadow + diffuse occlusion from Sky View Factor
         svf_only_irr = net_irradiance_image(
-            regional_ghi_kwh_m2_period,
-            shadow_freq,
-            beam_fraction=beam_fraction,
-            uhi_derate=1.0,
-            soiling_retention=1.0,
-            sky_view_factor=svf_img,
+            regional_ghi_kwh_m2_period, shadow_freq, beam_fraction=beam_fraction,
+            uhi_derate=1.0, soiling_retention=1.0, sky_view_factor=svf_img,
         )
         uhi_only_irr = net_irradiance_image(
-            regional_ghi_kwh_m2_period,
-            shadow_freq,
-            beam_fraction=beam_fraction,
-            uhi_derate=float(uhi_info["uhi_derate_factor"]),
-            soiling_retention=1.0,
+            regional_ghi_kwh_m2_period, shadow_freq, beam_fraction=beam_fraction,
+            uhi_derate=float(uhi_info["uhi_derate_factor"]), soiling_retention=1.0,
             sky_view_factor=svf_img,
         )
-        soiling_irr = net_irr  # shadow + svf + uhi + soiling (already built)
 
-        baseline_roof_kwh = _sum_kwh(baseline_irr, "baseline_ghi_kwh_m2_period")
-        after_shadow_roof_kwh = _sum_kwh(shadow_only_irr, "net_irradiance_kwh_m2_period")
-        after_svf_roof_kwh = _sum_kwh(svf_only_irr, "net_irradiance_kwh_m2_period")
-        after_uhi_roof_kwh = _sum_kwh(uhi_only_irr, "net_irradiance_kwh_m2_period")
-        after_soiling_roof_kwh = float(stats.get("energy_kwh_pixel") or 0.0)
+        # Batched reduction #1: all five stage energies (kWh = irr * roof_mask * area)
+        # plus roof area, summed over the building in ONE getInfo call.
+        area_img = roof_mask.toFloat().multiply(ee.Image.pixelArea())
+        sum_stack = (
+            baseline_irr.multiply(area_img).rename("e_baseline")
+            .addBands(shadow_only_irr.multiply(area_img).rename("e_shadow"))
+            .addBands(svf_only_irr.multiply(area_img).rename("e_svf"))
+            .addBands(uhi_only_irr.multiply(area_img).rename("e_uhi"))
+            .addBands(net_irr.multiply(area_img).rename("e_soiling"))
+            .addBands(area_img.rename("roof_area"))
+        )
+        sum_raw = sum_stack.reduceRegion(
+            reducer=ee.Reducer.sum(), geometry=building_geom, scale=4.0, maxPixels=1e7,
+        ).getInfo() or {}
+
+        # Batched reduction #2: per-pixel means of shadow frequency and SVF in ONE call.
+        mean_stack = shadow_freq.rename("shadow_frequency").addBands(svf_img.rename("sky_view_factor"))
+        mean_raw = mean_stack.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=building_geom, scale=4.0, maxPixels=1e7,
+        ).getInfo() or {}
+
+        baseline_roof_kwh = float(sum_raw.get("e_baseline") or 0.0)
+        after_shadow_roof_kwh = float(sum_raw.get("e_shadow") or 0.0)
+        after_svf_roof_kwh = float(sum_raw.get("e_svf") or 0.0)
+        after_uhi_roof_kwh = float(sum_raw.get("e_uhi") or 0.0)
+        after_soiling_roof_kwh = float(sum_raw.get("e_soiling") or 0.0)
+        roof_area_m2 = float(sum_raw.get("roof_area") or 0.0)
+        mean_shadow_frequency = mean_raw.get("shadow_frequency")
+        mean_sky_view_factor = mean_raw.get("sky_view_factor")
+        mean_shadow_fraction = mean_shadow_frequency  # shadow_freq IS the fraction in shadow
 
         # packing_factor: usable-roof coverage fraction. Applied uniformly to every
         # stage so penalty percentages are unchanged; only absolute kWh scale down to
@@ -955,9 +830,10 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             soiling_contrib_pct = soiling_loss_kwh / loss_total_for_split * 100.0
 
         # ------------------------------------------------------------------
-        # Rooftop shade matrix (6 evenly distributed 4-hour UTC buckets)
+        # Rooftop shade matrix (6 evenly distributed 4-hour UTC buckets).
+        # Each non-empty bucket's shadow-frequency image is stacked as a band and
+        # reduced together in ONE getInfo call (instead of one call per bucket).
         # ------------------------------------------------------------------
-        shade_intervals = []
         bucket_specs = [
             ("00-04", 0, 4),
             ("04-08", 4, 8),
@@ -967,37 +843,39 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             ("20-24", 20, 24),
         ]
         # solar_positions is a list of (alt_deg, az_deg, weight, hour_utc)
+        bucket_band = {}   # label -> band name (only for non-empty buckets)
+        shade_stack = None
         for label, h0, h1 in bucket_specs:
             bucket_positions = [
                 (p[0], p[1], p[2], p[3])
                 for p in (solar_positions or [])
                 if len(p) >= 4 and p[3] >= h0 and p[3] < h1
             ]
-            if not bucket_positions:
-                shade_fraction = 0.0
-            else:
-                wsum = sum(float(p[2]) for p in bucket_positions)
-                if wsum <= 0:
-                    shade_fraction = 0.0
-                else:
-                    norm_positions = [
-                        (p[0], p[1], p[2] / wsum, p[3]) for p in bucket_positions
-                    ]
-                    shadow_freq_bucket = ShadowPenalty.frequency(
-                        building_height, solar_positions=norm_positions
-                    )
-                    bucket_stats = (
-                        shadow_freq_bucket.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=building_geom,
-                            scale=4.0,
-                            maxPixels=1e7,
-                        )
-                        .getInfo()
-                    )
-                    raw_bucket = (bucket_stats or {}).get("shadow_frequency")
-                    shade_fraction = float(raw_bucket) if raw_bucket is not None else 0.0
+            wsum = sum(float(p[2]) for p in bucket_positions) if bucket_positions else 0.0
+            if not bucket_positions or wsum <= 0:
+                continue
+            norm_positions = [(p[0], p[1], p[2] / wsum, p[3]) for p in bucket_positions]
+            band = "shade_" + label.replace("-", "_")
+            freq_band = ShadowPenalty.frequency(
+                building_height, solar_positions=norm_positions
+            ).rename(band)
+            bucket_band[label] = band
+            shade_stack = freq_band if shade_stack is None else shade_stack.addBands(freq_band)
 
+        shade_raw = (
+            shade_stack.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=building_geom,
+                scale=4.0,
+                maxPixels=1e7,
+            ).getInfo() or {}
+        ) if shade_stack is not None else {}
+
+        shade_intervals = []
+        for label, h0, h1 in bucket_specs:
+            band = bucket_band.get(label)
+            raw_bucket = shade_raw.get(band) if band else None
+            shade_fraction = float(raw_bucket) if raw_bucket is not None else 0.0
             shade_area_m2 = float(roof_area_m2) * float(shade_fraction)
             shade_intervals.append(
                 {
@@ -1013,17 +891,7 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             if mean_shadow_frequency is not None else None
         )
 
-        # Mean SVF over the same building geometry (for the display-only mean irradiance).
-        svf_geo_stats = (
-            svf_img.reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=building_geom,
-                scale=4.0,
-                maxPixels=1e7,
-            ).getInfo()
-        )
-        mean_sky_view_factor = (svf_geo_stats or {}).get("sky_view_factor")
-
+        # mean_sky_view_factor already reduced above (batched reduction #2).
         diffuse_fraction = 1.0 - beam_fraction
         # Full retention scalar: diffuse * SVF + beam * (1 - shadow). Falls back to the
         # beam-only shadow retention if SVF could not be sampled.
@@ -1137,6 +1005,166 @@ def compute_yield(req: YieldRequest) -> Dict[str, Any]:
             },
         }
         return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _cap_positions(pos: List[Tuple]) -> List[Tuple]:
+    """Match /api/yield's position cap so series shadow sampling is identical."""
+    return pos[::2] if len(pos) > 42 else pos
+
+
+def _series_layout(
+    mode: str,
+    win: Dict[str, Any],
+    lat_deg: float,
+    lon_deg: float,
+) -> Tuple[List[str], List[Tuple[str, str, List[Tuple]]], List[int]]:
+    """
+    Build the sub-periods for the generation curve.
+
+    Returns (labels, items, bin_of) where:
+      labels : output x-axis labels
+      items  : list of (start_date, end_date_exclusive, solar_positions) to evaluate
+      bin_of : item index -> output bucket index (identity except weekly binning)
+    """
+    year = win.get("calendar_year")
+
+    if mode == "yearly":
+        items = []
+        for m in range(1, 13):
+            s = f"{year}-{m:02d}-01"
+            e = f"{year + 1}-01-01" if m == 12 else f"{year}-{m + 1:02d}-01"
+            items.append((s, e, _cap_positions(solar_positions_monthly(lat_deg, lon_deg, year, m))))
+        return list(_MONTH_ABBR), items, list(range(12))
+
+    if mode == "quarterly":
+        q = int(win["quarter"])
+        months = {1: [1, 2, 3], 2: [4, 5, 6], 3: [7, 8, 9], 4: [10, 11, 12]}[q]
+        items, labels = [], []
+        for m in months:
+            s = f"{year}-{m:02d}-01"
+            e = f"{year + 1}-01-01" if m == 12 else f"{year}-{m + 1:02d}-01"
+            items.append((s, e, _cap_positions(solar_positions_monthly(lat_deg, lon_deg, year, m))))
+            labels.append(_MONTH_ABBR[m - 1])
+        return labels, items, list(range(len(items)))
+
+    if mode == "monthly":
+        m = int(win["month"])
+        first = date(year, m, 1)
+        nxt = date(year + 1, 1, 1) if m == 12 else date(year, m + 1, 1)
+        ndays = (nxt - first).days
+        items, bin_of = [], []
+        for d in range(1, ndays + 1):
+            day = date(year, m, d)
+            s = day.isoformat()
+            e = (day + timedelta(days=1)).isoformat()
+            items.append((s, e, _cap_positions(solar_positions_single_day(lat_deg, lon_deg, day))))
+            bin_of.append(min(4, (d - 1) // 7))
+        return ["W1", "W2", "W3", "W4", "W5"], items, bin_of
+
+    # daily: a single point
+    s, e = win["start_date"], win["end_date_exclusive"]
+    d0 = date.fromisoformat(s)
+    return [s], [(s, e, _cap_positions(solar_positions_single_day(lat_deg, lon_deg, d0)))], [0]
+
+
+@app.post("/api/series")
+def compute_series(req: YieldRequest) -> Dict[str, Any]:
+    """
+    Generation curve for the selected window in a single HTTP call (vs one full
+    /api/yield per point). GHI + beam are sampled batched; the per-period shadow
+    retention is reduced one period at a time (a light, bounded EE request each)
+    so no single reduceRegion stacks every period's focal-max shadow at once.
+
+      yearly    -> 12 monthly points
+      quarterly -> the quarter's 3 monthly points
+      monthly   -> daily yields binned into weeks W1..W5
+      daily     -> single point
+
+    Uses the exact factorization of net_irradiance_image:
+      net_period = GHI * uhi * soiling * eff*PR*packing
+                   * [ (1-beam) * SUM(SVF*area) + beam * SUM((1-shadow_freq)*area) ]
+    so each point equals what /api/yield would return for that sub-window.
+    """
+    try:
+        try:
+            win = resolve_temporal_window(
+                req.baseline_mode, req.year, req.quarter, req.month,
+                req.start_date, req.end_date_exclusive,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex))
+
+        _ensure_ee(req.project_id)
+        coords, aoi = _aoi_from_req(req)
+        centroid = aoi.centroid(1)
+        lon_deg, lat_deg = _centroid_lon_lat(centroid)
+        mode = win["mode"]
+
+        labels, items, bin_of = _series_layout(mode, win, lat_deg, lon_deg)
+        if not items:
+            return {"status": "ok", "baseline_time_mode": mode, "labels": labels,
+                    "values": [0.0] * len(labels)}
+
+        _, building_height, roof_mask = _build_roof_layers(
+            aoi, req.roof_year, req.presence_threshold, req.min_height_m
+        )
+        building_geom, _, _, _, _ = _select_target_building(
+            aoi, coords, centroid, req.building_confidence
+        )
+        svf_img = SkyViewFactor.image(building_height)
+        area_img = roof_mask.toFloat().multiply(ee.Image.pixelArea())
+
+        # Per-sub-period scalars: GHI (1 getInfo) and beam fraction (1 getInfo).
+        windows = [(s, e) for (s, e, _pos) in items]
+        ghi_list = sample_era5_period_ghi_multi(centroid, windows, scale_m=ERA5_SCALE_M)
+        beam_list = sample_era5_beam_multi(centroid, windows, scale_m=_ERA5_HOURLY_SCALE_M)
+
+        # SUM(SVF*area) is static across sub-periods -> one reduction.
+        svf_area = float(
+            (svf_img.multiply(area_img).rename("svf_area")
+             .reduceRegion(ee.Reducer.sum(), building_geom, 4.0, maxPixels=1e7)
+             .getInfo() or {}).get("svf_area") or 0.0
+        )
+
+        # SUM((1-shadow_freq)*area) varies per sub-period (solar geometry differs).
+        # Reduce each period on its own: one period carries ~one window of solar
+        # positions -- the same focal-max load a single /api/yield handles. Stacking
+        # all periods into one reduceRegion would exceed EE's per-request memory.
+        retained_beam_area = []
+        for (_s, _e, pos) in items:
+            shadow_freq = ShadowPenalty.frequency(building_height, solar_positions=pos)
+            ba = ee.Image(1.0).subtract(shadow_freq).multiply(area_img).rename("ba")
+            raw = ba.reduceRegion(
+                reducer=ee.Reducer.sum(), geometry=building_geom, scale=4.0, maxPixels=1e7,
+            ).getInfo() or {}
+            retained_beam_area.append(float(raw.get("ba") or 0.0))
+
+        # UHI + soiling are annual (static across the sub-periods of one year).
+        uhi = UHIPenalty.stats(aoi, items[0][0])
+        soiling = SoilingPenalty.stats(aoi, items[0][0])
+        derate = float(uhi["uhi_derate_factor"]) * float(soiling["soiling_retention_factor"])
+        scale = req.panel_efficiency * req.performance_ratio * req.packing_factor
+
+        values = [0.0] * len(labels)
+        for i in range(len(items)):
+            beam_i = beam_list[i]
+            diffuse_i = 1.0 - beam_i
+            net_i = ghi_list[i] * derate * scale * (diffuse_i * svf_area + beam_i * retained_beam_area[i])
+            values[bin_of[i]] += net_i
+
+        return {
+            "status": "ok",
+            "baseline_time_mode": mode,
+            "labels": labels,
+            "values": [round(v, 3) for v in values],
+        }
     except HTTPException:
         raise
     except Exception as e:

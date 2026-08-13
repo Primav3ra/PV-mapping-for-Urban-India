@@ -1,4 +1,4 @@
-import { fetchBaseline, fetchPresets, fetchTiles, fetchYield, fetchBuildings } from './api.js';
+import { fetchPresets, fetchTiles, fetchYield, fetchBuildings, fetchSeries } from './api.js';
 import { createMapController } from './map.js';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -137,7 +137,7 @@ function inferWindow() {
   return { baseline_mode: 'monthly', year: sy, month: sm, label: 'kWh / week', kind: 'monthly' };
 }
 
-function computePvStages(baselineData, yieldData) {
+function computePvStages(yieldData) {
   // Prefer authoritative backend stage yields if present (prevents scope mismatches).
   const backendBaseline = Number(yieldData?.baseline_yield_kwh);
   const backendAfterShadow = Number(yieldData?.after_shadow_yield_kwh);
@@ -246,8 +246,8 @@ function ensurePenaltyChart() {
   return state.penaltyChart;
 }
 
-function renderResultBox(baselineData, yieldData) {
-  const stages = computePvStages(baselineData, yieldData);
+function renderResultBox(yieldData) {
+  const stages = computePvStages(yieldData);
   dom.pvBaseline.textContent = fmtNum(stages.baselinePv, 0);
   dom.pvAfterShadow.textContent =
     stages.baselinePv > 0 ? `${fmtNum(stages.afterShadowPv, 0)} (-${stages.shadowPenaltyPercent.toFixed(1)}%)` : '-';
@@ -285,7 +285,7 @@ function renderResultBox(baselineData, yieldData) {
   chart.update();
 }
 
-function renderKpis(baselineData, yieldData, temporalWindow) {
+function renderKpis(yieldData, temporalWindow) {
   const potential = Number(yieldData.period_yield_kwh ?? 0);
   const days = daysInRange(temporalWindow.start_date, temporalWindow.end_date_exclusive);
   const dailyAvg = potential / days;
@@ -409,7 +409,7 @@ function renderSavedMarkers() {
   mapCtrl.renderSavedPoints(points, state.activeSavedId);
 }
 
-function saveCalculation({ baseline, yieldData, temporal, series }) {
+function saveCalculation({ yieldData, temporalWindow, temporal, series }) {
   const id = String(Date.now());
   const entry = {
     id,
@@ -418,7 +418,7 @@ function saveCalculation({ baseline, yieldData, temporal, series }) {
     half_size_deg: state.half_size_deg,
     createdAt: new Date().toISOString(),
     temporal,
-    baseline,
+    temporalWindow,
     yieldData,
     series,
   };
@@ -440,50 +440,18 @@ function loadSavedCalculation(id) {
   dom.aoiLon.textContent = state.lon.toFixed(6);
   mapCtrl?.drawAOI(state.lat, state.lon, state.half_size_deg);
 
-  renderResultBox(entry.baseline, entry.yieldData);
+  renderResultBox(entry.yieldData);
   renderRooftopAnalysis(entry.yieldData);
   renderShadeMatrix(entry.yieldData);
-  renderKpis(entry.baseline, entry.yieldData, entry.baseline.temporal_window);
+  renderKpis(entry.yieldData, entry.temporalWindow ?? {
+    start_date: entry.yieldData?.start_date,
+    end_date_exclusive: entry.yieldData?.end_date_exclusive,
+  });
   if (mapCtrl) mapCtrl.renderBuildingLayer(entry.yieldData.geojson);
   if (entry.series) setChart(entry.series.labels, entry.series.values, entry.temporal?.label ?? 'kWh');
 
   renderSavedMarkers();
   setStatus(`Loaded saved result #${state.savedCalcs.findIndex((e) => e.id === id) + 1} for comparison.`);
-}
-
-async function computeSeries(payloadBase, win) {
-  if (win.kind === 'yearly') {
-    const labels = MONTHS.slice();
-    const values = [];
-    for (let month = 1; month <= 12; month += 1) {
-      const data = await fetchYield({ ...payloadBase, baseline_mode: 'monthly', year: win.year, month });
-      values.push(Math.round(data.period_yield_kwh || 0));
-    }
-    return { labels, values };
-  }
-
-  if (win.kind === 'quarterly') {
-    const months = { 1: [1, 2, 3], 2: [4, 5, 6], 3: [7, 8, 9], 4: [10, 11, 12] }[win.quarter];
-    const labels = months.map((m) => MONTHS[m - 1]);
-    const values = [];
-    for (const month of months) {
-      const data = await fetchYield({ ...payloadBase, baseline_mode: 'monthly', year: win.year, month });
-      values.push(Math.round(data.period_yield_kwh || 0));
-    }
-    return { labels, values };
-  }
-
-  const days = new Date(win.year, win.month, 0).getDate();
-  const bins = [0, 0, 0, 0, 0];
-  for (let day = 1; day <= days; day += 1) {
-    const start = `${win.year}-${String(win.month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    const endDate = new Date(win.year, win.month - 1, day + 1);
-    const end = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
-    const data = await fetchYield({ ...payloadBase, baseline_mode: 'daily', start_date: start, end_date_exclusive: end });
-    const idx = Math.min(4, Math.floor((day - 1) / 7));
-    bins[idx] += Number(data.period_yield_kwh || 0);
-  }
-  return { labels: ['W1', 'W2', 'W3', 'W4', 'W5'], values: bins.map((v) => Math.round(v)) };
 }
 
 async function showOverlayForLayer(layer) {
@@ -564,17 +532,21 @@ async function runCompute() {
   try {
     dom.runComputeBtn.disabled = true;
     setStatus('Running backend calculations...');
-    const baseline = await fetchBaseline({ ...payloadBase, ...temporal });
     const yieldData = await fetchYield({ ...payloadBase, ...temporal });
     if (yieldData.status !== 'ok') {
       setStatus(yieldData.message || 'No rooftop found at selected point.');
       return;
     }
     state.lastYield = yieldData;
-    renderResultBox(baseline, yieldData);
+    // Temporal window comes straight from the yield response (no separate baseline call).
+    const temporalWindow = {
+      start_date: yieldData.start_date,
+      end_date_exclusive: yieldData.end_date_exclusive,
+    };
+    renderResultBox(yieldData);
     renderRooftopAnalysis(yieldData);
     renderShadeMatrix(yieldData);
-    renderKpis(baseline, yieldData, baseline.temporal_window);
+    renderKpis(yieldData, temporalWindow);
     if (mapCtrl) {
       mapCtrl.renderBuildingLayer(yieldData.geojson);
     }
@@ -588,12 +560,21 @@ async function runCompute() {
     }
 
     setStatus('Computing trend curve...');
-    const series = await computeSeries(payloadBase, temporal);
-    setChart(series.labels, series.values, temporal.label);
-    setStatus('Done. Dashboard updated.');
+    // Whole curve in one server-side call instead of one /api/yield per point.
+    const series = await fetchSeries({ ...payloadBase, ...temporal });
+    const hasSeries = series && series.status === 'ok'
+      && Array.isArray(series.values) && series.values.length > 0;
+    if (hasSeries) {
+      setChart(series.labels, series.values, temporal.label);
+      setStatus('Done. Dashboard updated.');
+    } else {
+      setChart([], [], temporal.label);
+      setStatus('Dashboard updated (trend curve unavailable).');
+      showToast(`Trend curve failed: ${series?.detail || series?.message || 'unknown error'}`);
+    }
 
     // Keep last 5 computations for quick comparison.
-    saveCalculation({ baseline, yieldData, temporal, series });
+    saveCalculation({ yieldData, temporalWindow, temporal, series: hasSeries ? series : null });
   } catch (e) {
     setStatus(`Failed: ${e.message}`);
     showToast('Computation failed. Check backend/server logs.');

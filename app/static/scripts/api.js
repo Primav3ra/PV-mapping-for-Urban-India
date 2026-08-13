@@ -4,15 +4,6 @@ export async function fetchPresets() {
   return response.json();
 }
 
-export async function fetchBaseline(payload) {
-  const response = await fetch('/api/baseline', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  return response.json();
-}
-
 export async function fetchYield(payload) {
   const response = await fetch('/api/yield', {
     method: 'POST',
@@ -31,8 +22,8 @@ export async function fetchTiles(payload) {
   return response.json();
 }
 
-export async function fetchUrbanMetrics(payload) {
-  const response = await fetch('/api/urban_metrics', {
+export async function fetchSeries(payload) {
+  const response = await fetch('/api/series', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
