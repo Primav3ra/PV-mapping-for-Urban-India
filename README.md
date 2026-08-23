@@ -1,4 +1,18 @@
-# SOLARIS - Rooftop Solar Mapping for Urban Cities
+<h1 align="center">SOLARIS</h1>
+<p align="center">
+  Rooftop solar PV yield mapping for urban cities.<br>
+  Built on Google Earth Engine, FastAPI, and Leaflet.
+</p>
+<p align="center">
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white">
+  <img alt="Leaflet" src="https://img.shields.io/badge/map-Leaflet-199900?logo=leaflet&logoColor=white">
+  <img alt="Google Earth Engine" src="https://img.shields.io/badge/geo-Earth%20Engine-34A853?logo=googleearth&logoColor=white">
+  <img alt="license" src="https://img.shields.io/badge/license-academic%2Fresearch-yellow">
+  <img alt="resolution" src="https://img.shields.io/badge/resolution-4m-brightgreen">
+</p>
+
+---
 
 <img width="1917" height="928" alt="image" src="https://github.com/user-attachments/assets/7af6d917-0f41-4aed-8d67-d28a4ff892be" />
 
